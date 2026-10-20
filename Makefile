@@ -20,7 +20,7 @@ ARM_TARGET := thumbv7em-none-eabihf
 .PHONY: help all avr riscv rust fsw build clean sim vcd wave \
         debug debug-avr debug-riscv verify doctor esp32 \
         rust-test rust-riscv rust-arm rust-riscv-run rust-check rust-fmt \
-        fprime fprime-run fprime-ut fprime-gds gds-demo cad cad-preview
+        fprime fprime-run fprime-ut fprime-gds gds-demo cad cad-preview cad-check
 
 help:
 	@echo "embedded - headless FOSS toolchain (F´/C++ flight software)"
@@ -90,9 +90,13 @@ cad-preview:
 		--camera=0,0,0,55,0,25,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
 	$(OPENSCAD) -D 'explode=0.55' -o $(ROOT)/cad/cubesat-exploded.png --imgsize=1100,850 \
 		--camera=0,0,0,55,0,25,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
-	$(OPENSCAD) -D 'show_panels=false' -D 'show_antenna=false' \
-		-o $(ROOT)/cad/cubesat-stack.png --imgsize=1100,850 \
-		--camera=0,0,0,55,0,25,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
+	$(OPENSCAD) -D 'show_panels=false' -D 'show_antenna=false' -D 'show_mli=false' \
+		-D 'explode=0.9' -o $(ROOT)/cad/cubesat-stack.png --imgsize=1100,850 \
+		--camera=0,0,0,78,0,18,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
+
+cad-check: cad
+	python3 $(ROOT)/cad/check_stl.py \
+		$(ROOT)/cad/cubesat.stl $(ROOT)/cad/cubesat-exploded.stl
 
 rust: rust-test rust-arm rust-riscv
 

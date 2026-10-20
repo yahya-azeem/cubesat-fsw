@@ -159,6 +159,7 @@ caveats (it is a packaging model, not structural analysis).
 
 ```bash
 make cad            # cubesat.stl + cubesat-exploded.stl
+make cad-check      # watertight: 0 non-manifold edges, 0 degenerate triangles
 make cad-preview    # assembly / exploded / stack PNGs
 ```
 

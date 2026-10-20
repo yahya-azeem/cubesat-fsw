@@ -19,8 +19,17 @@ embedded/
 ├── riscv/                    # bare-metal rv32 C17 demo (QEMU virt)
 ├── rust/                     # host reference model + QEMU sandbox
 ├── tools/gen-pac.sh          # VA41620 PAC from the vendor SVD
-├── setup/{install,verify}.sh
+├── setup/{install,install-fprime,verify}.sh
 └── esp32/README.md
+```
+
+## Install
+
+```bash
+cd ~/Projects/embedded
+./setup/install.sh         # system packages (sudo)
+./setup/install-fprime.sh  # F´ tooling venv (no sudo)
+./setup/verify.sh          # 20/20 passing on this machine
 ```
 
 ## Verify

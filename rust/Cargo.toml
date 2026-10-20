@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "cubesat-core",
+    "firmware-riscv-qemu",
+    "firmware-va41620",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[profile.dev]
+panic = "abort"

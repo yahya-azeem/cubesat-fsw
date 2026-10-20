@@ -1,0 +1,7 @@
+[package]
+name = "cubesat-core"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware-independent 1U CubeSat mission logic: power budget, mode FSM, CCSDS frames"
+
+[dependencies]

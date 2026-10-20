@@ -1,0 +1,1 @@
+/home/yahya/embedded/rust/target/riscv32imac-unknown-none-elf/release/firmware-riscv-qemu: /home/yahya/embedded/rust/firmware-riscv-qemu/build.rs /home/yahya/embedded/rust/firmware-riscv-qemu/linker.ld /home/yahya/embedded/rust/firmware-riscv-qemu/src/main.rs

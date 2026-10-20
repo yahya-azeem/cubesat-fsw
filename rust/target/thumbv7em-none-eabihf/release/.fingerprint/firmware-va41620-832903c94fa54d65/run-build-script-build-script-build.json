@@ -1,0 +1,1 @@
+{"rustc":12019306335353385202,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[10087429455886874409,"build_script_build",false,10504208923534054309]],"local":[{"RerunIfChanged":{"output":"thumbv7em-none-eabihf/release/build/firmware-va41620-832903c94fa54d65/output","paths":["linker.ld"]}}],"rustflags":[],"config":0,"compile_kind":0}

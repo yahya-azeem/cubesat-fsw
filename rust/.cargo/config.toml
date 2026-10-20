@@ -1,0 +1,9 @@
+[target.riscv32imac-unknown-none-elf]
+runner = "qemu-system-riscv32 -machine virt -bios none -nographic -monitor none -kernel"
+
+[target.thumbv7em-none-eabihf]
+# No runner: VA41620 hardware is not attached to this machine.
+
+[alias]
+firmware = "build --release --target thumbv7em-none-eabihf -p firmware-va41620"
+qemu-riscv = "build --release --target riscv32imac-unknown-none-elf -p firmware-riscv-qemu"

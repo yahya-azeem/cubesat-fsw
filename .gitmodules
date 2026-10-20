@@ -1,0 +1,3 @@
+[submodule "fsw/fprime/cubesat-fsw/lib/fprime"]
+	path = fsw/fprime/cubesat-fsw/lib/fprime
+	url = https://github.com/nasa/fprime

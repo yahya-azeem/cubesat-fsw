@@ -1,0 +1,13 @@
+[package]
+name = "firmware-riscv-qemu"
+version = "0.1.0"
+edition = "2021"
+description = "Bare-metal rv32 firmware for QEMU virt (Rust port of the C demo)"
+
+[dependencies]
+
+[[bin]]
+name = "firmware-riscv-qemu"
+path = "src/main.rs"
+test = false
+bench = false

@@ -1,0 +1,15 @@
+build/
+*.o
+*.elf
+*.hex
+*.vcd
+*.map
+*.log
+
+# F´
+.venv-fprime/
+fsw/fprime/cubesat-fsw/build-*/
+fsw/fprime/cubesat-fsw/build-artifacts/
+logs/
+*.gcda
+*.gcno

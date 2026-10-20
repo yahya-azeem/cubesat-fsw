@@ -13,3 +13,4 @@ fsw/fprime/cubesat-fsw/build-artifacts/
 logs/
 *.gcda
 *.gcno
+cad/*.stl

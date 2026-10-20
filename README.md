@@ -18,6 +18,7 @@ embedded/
 ├── avr/                      # atmega328p C17 demo + simavr VCD harness
 ├── riscv/                    # bare-metal rv32 C17 demo (QEMU virt)
 ├── rust/                     # host reference model + QEMU sandbox
+├── cad/                      # OpenSCAD 1U packaging model
 ├── tools/gen-pac.sh          # VA41620 PAC from the vendor SVD
 ├── setup/{install,install-fprime,verify}.sh
 └── esp32/README.md
@@ -146,6 +147,25 @@ The demo sequence and the expected telemetry:
 That last row is the point: the battery guard is enforced in the component,
 not in the UI, so the same refusal happens from the GDS, a script, or the
 flight sequencer.
+
+## Physical model (OpenSCAD)
+
+![1U CubeSat assembly](cad/cubesat.png)
+
+Parametric 1U envelope in `cad/cubesat.scad`: 100 mm body, 8.5 mm rails,
+body-mounted solar cells, four-board stack, S-band patch and deployable UHF
+whip. `cad/README.md` maps each feature to the subsystem and documents the
+caveats (it is a packaging model, not structural analysis).
+
+```bash
+make cad            # cubesat.stl + cubesat-exploded.stl
+make cad-preview    # assembly / exploded / stack PNGs
+```
+
+`u = 1..3` changes the envelope; `explode`, `show_panels`, `show_stack` and
+`show_antenna` control the view. OpenSCAD is not installed by
+`setup/install.sh` because it is optional: `sudo pacman -S openscad`, or use
+the upstream AppImage.
 
 ## Emulation
 

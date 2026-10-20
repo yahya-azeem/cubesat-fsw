@@ -20,7 +20,7 @@ ARM_TARGET := thumbv7em-none-eabihf
 .PHONY: help all avr riscv rust fsw build clean sim vcd wave \
         debug debug-avr debug-riscv verify doctor esp32 \
         rust-test rust-riscv rust-arm rust-riscv-run rust-check rust-fmt \
-        fprime fprime-run fprime-ut fprime-gds gds-demo
+        fprime fprime-run fprime-ut fprime-gds gds-demo cad cad-preview
 
 help:
 	@echo "embedded - headless FOSS toolchain (F´/C++ flight software)"
@@ -32,6 +32,8 @@ help:
 	@echo "  make fprime-ut     run the F´ component unit tests (11 tests)"
 	@echo "  make fprime-gds    launch the browser GDS on http://localhost:5000"
 	@echo "  make gds-demo      drive a full pass through the live GDS"
+	@echo "  make cad           export 1U/exploded STL from cad/cubesat.scad"
+	@echo "  make cad-preview   render the CAD PNGs"
 	@echo "  make rust          test mission logic + build both Rust firmwares"
 	@echo "  make rust-test     host unit tests for cubesat-core"
 	@echo "  make rust-riscv    build rv32 firmware (QEMU virt)"
@@ -75,6 +77,22 @@ fprime-gds: fprime
 
 gds-demo:
 	$(ROOT)/scripts/gds-demo.sh
+
+# CAD: OpenSCAD 2021.01 or newer. Override with OPENSCAD=/path/to/AppImage.
+OPENSCAD ?= openscad
+
+cad:
+	$(OPENSCAD) -o $(ROOT)/cad/cubesat.stl $(ROOT)/cad/cubesat.scad
+	$(OPENSCAD) -D 'explode=0.55' -o $(ROOT)/cad/cubesat-exploded.stl $(ROOT)/cad/cubesat.scad
+
+cad-preview:
+	$(OPENSCAD) -o $(ROOT)/cad/cubesat.png --imgsize=1100,850 \
+		--camera=0,0,0,55,0,25,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
+	$(OPENSCAD) -D 'explode=0.55' -o $(ROOT)/cad/cubesat-exploded.png --imgsize=1100,850 \
+		--camera=0,0,0,55,0,25,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
+	$(OPENSCAD) -D 'show_panels=false' -D 'show_antenna=false' \
+		-o $(ROOT)/cad/cubesat-stack.png --imgsize=1100,850 \
+		--camera=0,0,0,55,0,25,0 --viewall --autocenter $(ROOT)/cad/cubesat.scad
 
 rust: rust-test rust-arm rust-riscv
 

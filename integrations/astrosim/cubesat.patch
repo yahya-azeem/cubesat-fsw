@@ -1,0 +1,4420 @@
+diff --git a/index.html b/index.html
+index 7ac4b43..5480553 100644
+--- a/index.html
++++ b/index.html
+@@ -35,13 +35,47 @@
+ </head>
+ <body>
+     <script type="module">
+-        import init, { start_simulation } from './pkg/AstroSim.js';
++        import init, { start_simulation, set_cubesat_state, set_cubesat_mode } from './pkg/AstroSim.js';
++        import { startCubesatBridge } from './cubesat_bridge.js';
++        const params = new URLSearchParams(location.search);
++        const initialMode = params.get('mode');
++        const endpoint = params.get('endpoint') || 'http://127.0.0.1:8787/state';
++        const API = window.AstroSim = {
++            ready: false,
++            mode: initialMode === 'universe' ? 1 : 0,
++            telemetry: null,
++            setMode(mode) {
++                const m = (mode === 'universe' || mode === 1) ? 1 : 0;
++                this.mode = m;
++                set_cubesat_mode(m);
++            },
++            getMode() { return this.mode === 1 ? 'universe' : 'earth'; },
++            getTelemetry() { return this.telemetry; },
++        };
++        addEventListener('message', (event) => {
++            const data = event.data || {};
++            if (data.type === 'astrosim:setMode') API.setMode(data.mode);
++            if (data.type === 'astrosim:getState' && event.source) {
++                event.source.postMessage({
++                    type: 'astrosim:state',
++                    mode: API.getMode(),
++                    telemetry: API.telemetry,
++                }, '*');
++            }
++        });
++        window.setCubesatMode = (mode) => API.setMode(mode);
+         
+         async function run() {
+             try {
+                 await init();
+                 console.log("AstroSim WASM module loaded.");
++                startCubesatBridge(set_cubesat_state, endpoint, (state) => { API.telemetry = state; });
+                 await start_simulation();
++                if (initialMode) { API.setMode(initialMode); }
++                API.ready = true;
++                if (window.parent !== window) {
++                    window.parent.postMessage({ type: 'astrosim:ready' }, '*');
++                }
+                 console.log("AstroSim simulation started successfully.");
+             } catch (err) {
+                 console.error("Error loading/starting AstroSim:", err);
+diff --git a/src/app.rs b/src/app.rs
+index 411e7bc..16f68c6 100644
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,21 +1,21 @@
+ use crate::physics::PhysicsEngine;
+-use crate::physics::vulkan_compute::VulkanComputePhysicsEngine;
+ #[cfg(not(target_arch = "wasm32"))]
+ use crate::physics::cuda::CudaPhysicsEngine;
++use crate::physics::vulkan_compute::VulkanComputePhysicsEngine;
+ 
+-use crate::render::renderer::BodyUbo;
+ use crate::render::Renderer;
++use crate::render::renderer::BodyUbo;
+ 
+ use anyhow::{Result, anyhow};
+-use std::sync::Arc;
+-use std::collections::HashSet;
+ use log::{info, warn};
+ use nalgebra::Vector3;
++use std::collections::HashSet;
++use std::sync::Arc;
+ use winit::application::ApplicationHandler;
+-use winit::event::{WindowEvent, MouseButton, MouseScrollDelta};
++use winit::event::{MouseButton, MouseScrollDelta, WindowEvent};
+ use winit::event_loop::ActiveEventLoop;
+-use winit::window::{Window, WindowId};
+ use winit::keyboard::{KeyCode, PhysicalKey};
++use winit::window::{Window, WindowId};
+ 
+ #[cfg(target_arch = "wasm32")]
+ fn get_time_seconds() -> f64 {
+@@ -28,7 +28,10 @@ fn get_time_seconds() -> f64 {
+ #[cfg(not(target_arch = "wasm32"))]
+ fn get_time_seconds() -> f64 {
+     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+-    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
++    START
++        .get_or_init(std::time::Instant::now)
++        .elapsed()
++        .as_secs_f64()
+ }
+ 
+ pub struct AppState {
+@@ -57,7 +60,14 @@ pub struct AppState {
+     search_query: String,
+     fetch_status: Arc<std::sync::Mutex<String>>,
+     active_system_name: String,
+-    pending_system_data: Arc<std::sync::Mutex<Option<(String, Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>)>>>,
++    pending_system_data: Arc<
++        std::sync::Mutex<
++            Option<(
++                String,
++                Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>,
++            )>,
++        >,
++    >,
+     follow_camera: bool,
+     hovered_body_idx: Option<usize>,
+     last_time: f64,
+@@ -153,7 +163,8 @@ impl AppState {
+     pub async fn new(window: Arc<Window>) -> Result<Self> {
+         info!("Initializing cross-platform wgpu context...");
+         let instance = wgpu::Instance::default();
+-        let surface = instance.create_surface(window.clone())
++        let surface = instance
++            .create_surface(window.clone())
+             .map_err(|e| anyhow!("Failed to create surface: {:?}", e))?;
+ 
+         let adapter = instance
+@@ -166,16 +177,14 @@ impl AppState {
+             .map_err(|e| anyhow!("Failed to request adapter: {:?}", e))?;
+ 
+         let (device, queue) = adapter
+-            .request_device(
+-                &wgpu::DeviceDescriptor {
+-                    label: Some("Logical Device"),
+-                    required_features: wgpu::Features::empty(),
+-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+-                    experimental_features: Default::default(),
+-                    memory_hints: Default::default(),
+-                    trace: wgpu::Trace::default(),
+-                },
+-            )
++            .request_device(&wgpu::DeviceDescriptor {
++                label: Some("Logical Device"),
++                required_features: wgpu::Features::empty(),
++                required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
++                experimental_features: Default::default(),
++                memory_hints: Default::default(),
++                trace: wgpu::Trace::default(),
++            })
+             .await
+             .map_err(|e| anyhow!("Failed to request device: {:?}", e))?;
+ 
+@@ -204,11 +213,15 @@ impl AppState {
+         imgui.set_ini_filename(Some(std::path::PathBuf::from("imgui.ini")));
+         #[cfg(target_arch = "wasm32")]
+         imgui.set_ini_filename(None);
+-        
++
+         #[cfg(not(target_arch = "wasm32"))]
+         let mut platform = imgui_winit_support::WinitPlatform::init(&mut imgui);
+         #[cfg(not(target_arch = "wasm32"))]
+-        platform.attach_window(imgui.io_mut(), &window, imgui_winit_support::HiDpiMode::Default);
++        platform.attach_window(
++            imgui.io_mut(),
++            &window,
++            imgui_winit_support::HiDpiMode::Default,
++        );
+ 
+         let renderer = Renderer::new(
+             device.clone(),
+@@ -218,7 +231,8 @@ impl AppState {
+             &mut imgui,
+         )?;
+ 
+-        let mut physics_engine: Box<dyn PhysicsEngine> = Box::new(VulkanComputePhysicsEngine::new());
++        let mut physics_engine: Box<dyn PhysicsEngine> =
++            Box::new(VulkanComputePhysicsEngine::new());
+         #[cfg(not(target_arch = "wasm32"))]
+         {
+             match CudaPhysicsEngine::try_new() {
+@@ -227,7 +241,10 @@ impl AppState {
+                     physics_engine = Box::new(cuda_engine);
+                 }
+                 Err(e) => {
+-                    warn!("CUDA backend not available (using CPU solver fallback): {:?}", e);
++                    warn!(
++                        "CUDA backend not available (using CPU solver fallback): {:?}",
++                        e
++                    );
+                 }
+             }
+         }
+@@ -327,8 +344,8 @@ impl AppState {
+ 
+         // Load JSON configuration embedded at compile-time
+         const SOLAR_SYSTEM_JSON: &str = include_str!("solar_system.json");
+-        let data: SolarSystemData = serde_json::from_str(SOLAR_SYSTEM_JSON)
+-            .expect("Failed to parse solar_system.json");
++        let data: SolarSystemData =
++            serde_json::from_str(SOLAR_SYSTEM_JSON).expect("Failed to parse solar_system.json");
+ 
+         let sun_mass = data.bodies[0].mass;
+ 
+@@ -350,8 +367,10 @@ impl AppState {
+                 // Calculate orbital period dynamically: P_days = 365.256363 * a0^1.5
+                 let period_days = 365.256363 * elements.a0.powf(1.5);
+                 for step_i in 0..1000 {
+-                    let jd_step = starting_jd - period_days + (step_i as f64 / 1000.0) * period_days;
+-                    let (pos_step, _) = crate::physics::kepler::get_orbit_state(elements, jd_step, sun_mass);
++                    let jd_step =
++                        starting_jd - period_days + (step_i as f64 / 1000.0) * period_days;
++                    let (pos_step, _) =
++                        crate::physics::kepler::get_orbit_state(elements, jd_step, sun_mass);
+                     let p_render = Vector3::new(
+                         (pos_step.x / au) as f32,
+                         (pos_step.y / au) as f32,
+@@ -371,14 +390,18 @@ impl AppState {
+         // Procedural LCG random generator for Asteroid Belt
+         let mut lcg_seed = 123456789_u64;
+         let mut next_rand = || {
+-            lcg_seed = lcg_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            lcg_seed = lcg_seed
++                .wrapping_mul(6364136223846793005)
++                .wrapping_add(1442695040888963407);
+             (lcg_seed >> 32) as f64 / 4294967296.0
+         };
+ 
+         // Asteroid Belt from configuration
+         let belt = &data.asteroid_belt;
+         for k in 0..belt.count {
+-            let a = (belt.semi_major_min + next_rand() * (belt.semi_major_max - belt.semi_major_min)) * au;
++            let a = (belt.semi_major_min
++                + next_rand() * (belt.semi_major_max - belt.semi_major_min))
++                * au;
+             let e = 0.01 + next_rand() * 0.15;
+             let i = (next_rand() * 15.0).to_radians();
+             let omega = (next_rand() * 360.0).to_radians();
+@@ -387,69 +410,96 @@ impl AppState {
+ 
+             let period = 2.0 * std::f64::consts::PI * (a.powi(3) / (g * sun_mass)).sqrt();
+ 
+-            self.keplerian_bodies.push(crate::physics::kepler::KeplerianBody {
+-                name: format!("Asteroid-{}", k + 1),
+-                parent_idx: 0,
+-                semi_major_axis: a,
+-                eccentricity: e,
+-                inclination: i,
+-                longitude_ascending_node: omega,
+-                argument_periapsis: arg_peri,
+-                mean_anomaly_epoch: m0,
+-                epoch_jd: starting_jd,
+-                period,
+-                radius_render: 0.00015 + (next_rand() as f32) * 0.00015,
+-                body_type: belt.body_type,
+-            });
++            self.keplerian_bodies
++                .push(crate::physics::kepler::KeplerianBody {
++                    name: format!("Asteroid-{}", k + 1),
++                    parent_idx: 0,
++                    semi_major_axis: a,
++                    eccentricity: e,
++                    inclination: i,
++                    longitude_ascending_node: omega,
++                    argument_periapsis: arg_peri,
++                    mean_anomaly_epoch: m0,
++                    epoch_jd: starting_jd,
++                    period,
++                    radius_render: 0.00015 + (next_rand() as f32) * 0.00015,
++                    body_type: belt.body_type,
++                });
+         }
+ 
+         // Moons from configuration
+         for moon in &data.moons {
+-            let parent_idx = data.bodies.iter().position(|b| b.name == moon.parent_name).unwrap_or(0);
+-            let parent_mass = data.bodies.get(parent_idx).map(|b| b.mass).unwrap_or(5.972e24);
+-
+-            let period = 2.0 * std::f64::consts::PI * (moon.semi_major_axis.powi(3) / (g * parent_mass)).sqrt();
+-
+-            self.keplerian_bodies.push(crate::physics::kepler::KeplerianBody {
+-                name: moon.name.clone(),
+-                parent_idx,
+-                semi_major_axis: moon.semi_major_axis,
+-                eccentricity: moon.eccentricity,
+-                inclination: moon.inclination.to_radians(),
+-                longitude_ascending_node: moon.longitude_ascending_node.to_radians(),
+-                argument_periapsis: moon.argument_periapsis.to_radians(),
+-                mean_anomaly_epoch: moon.mean_anomaly_epoch.to_radians(),
+-                epoch_jd: starting_jd,
+-                period,
+-                radius_render: moon.radius_render,
+-                body_type: moon.body_type,
+-            });
++            let parent_idx = data
++                .bodies
++                .iter()
++                .position(|b| b.name == moon.parent_name)
++                .unwrap_or(0);
++            let parent_mass = data
++                .bodies
++                .get(parent_idx)
++                .map(|b| b.mass)
++                .unwrap_or(5.972e24);
++
++            let period = 2.0
++                * std::f64::consts::PI
++                * (moon.semi_major_axis.powi(3) / (g * parent_mass)).sqrt();
++
++            self.keplerian_bodies
++                .push(crate::physics::kepler::KeplerianBody {
++                    name: moon.name.clone(),
++                    parent_idx,
++                    semi_major_axis: moon.semi_major_axis,
++                    eccentricity: moon.eccentricity,
++                    inclination: moon.inclination.to_radians(),
++                    longitude_ascending_node: moon.longitude_ascending_node.to_radians(),
++                    argument_periapsis: moon.argument_periapsis.to_radians(),
++                    mean_anomaly_epoch: moon.mean_anomaly_epoch.to_radians(),
++                    epoch_jd: starting_jd,
++                    period,
++                    radius_render: moon.radius_render,
++                    body_type: moon.body_type,
++                });
+         }
+ 
+         // Satellites from configuration
+         for sat in &data.satellites {
+-            let parent_idx = data.bodies.iter().position(|b| b.name == sat.parent_name).unwrap_or(0);
+-            let parent_mass = data.bodies.get(parent_idx).map(|b| b.mass).unwrap_or(5.972e24);
+-
+-            let period = 2.0 * std::f64::consts::PI * (sat.semi_major_axis.powi(3) / (g * parent_mass)).sqrt();
+-
+-            self.keplerian_bodies.push(crate::physics::kepler::KeplerianBody {
+-                name: sat.name.clone(),
+-                parent_idx,
+-                semi_major_axis: sat.semi_major_axis,
+-                eccentricity: sat.eccentricity,
+-                inclination: sat.inclination.to_radians(),
+-                longitude_ascending_node: sat.longitude_ascending_node.to_radians(),
+-                argument_periapsis: sat.argument_periapsis.to_radians(),
+-                mean_anomaly_epoch: sat.mean_anomaly_epoch.to_radians(),
+-                epoch_jd: starting_jd,
+-                period,
+-                radius_render: sat.radius_render,
+-                body_type: sat.body_type,
+-            });
++            let parent_idx = data
++                .bodies
++                .iter()
++                .position(|b| b.name == sat.parent_name)
++                .unwrap_or(0);
++            let parent_mass = data
++                .bodies
++                .get(parent_idx)
++                .map(|b| b.mass)
++                .unwrap_or(5.972e24);
++
++            let period = 2.0
++                * std::f64::consts::PI
++                * (sat.semi_major_axis.powi(3) / (g * parent_mass)).sqrt();
++
++            self.keplerian_bodies
++                .push(crate::physics::kepler::KeplerianBody {
++                    name: sat.name.clone(),
++                    parent_idx,
++                    semi_major_axis: sat.semi_major_axis,
++                    eccentricity: sat.eccentricity,
++                    inclination: sat.inclination.to_radians(),
++                    longitude_ascending_node: sat.longitude_ascending_node.to_radians(),
++                    argument_periapsis: sat.argument_periapsis.to_radians(),
++                    mean_anomaly_epoch: sat.mean_anomaly_epoch.to_radians(),
++                    epoch_jd: starting_jd,
++                    period,
++                    radius_render: sat.radius_render,
++                    body_type: sat.body_type,
++                });
+         }
+ 
+-        self.selected_body_idx = data.bodies.iter().position(|b| b.name == "Earth").unwrap_or(3);
++        self.selected_body_idx = data
++            .bodies
++            .iter()
++            .position(|b| b.name == "Earth")
++            .unwrap_or(3);
+         self.camera_distance = 18.0;
+         self.camera_target = Vector3::zeros();
+         self.follow_camera = false;
+@@ -477,22 +527,27 @@ impl AppState {
+             if let Some((star_name, bodies)) = pending.take() {
+                 info!("Loading exoplanetary system: {}", star_name);
+                 self.active_system_name = star_name;
+-                
++
+                 self.physics_engine.clear();
+                 self.body_names.clear();
+                 self.body_radii.clear();
+                 self.body_types.clear();
+                 self.history_trails.clear();
+                 self.keplerian_bodies.clear();
+-                
++
+                 let au = 1.495978707e11_f64;
+-                let star_pos = if !bodies.is_empty() { bodies[0].1 } else { Vector3::zeros() };
+-                for (i, (name, pos, vel, mass, radius, body_type)) in bodies.into_iter().enumerate() {
++                let star_pos = if !bodies.is_empty() {
++                    bodies[0].1
++                } else {
++                    Vector3::zeros()
++                };
++                for (i, (name, pos, vel, mass, radius, body_type)) in bodies.into_iter().enumerate()
++                {
+                     self.physics_engine.add_body(pos, vel, mass);
+                     self.body_names.push(name);
+                     self.body_radii.push(radius);
+                     self.body_types.push(body_type);
+-                    
++
+                     let mut trail = std::collections::VecDeque::with_capacity(1000);
+                     if i == 0 {
+                         for _ in 0..1000 {
+@@ -508,12 +563,10 @@ impl AppState {
+                         if r > 0.0 {
+                             let angle_start = rel_pos.z.atan2(rel_pos.x);
+                             for step_i in 0..1000 {
+-                                let theta = angle_start + (step_i as f64 / 1000.0) * 2.0 * std::f64::consts::PI;
+-                                let p_step = star_pos + Vector3::new(
+-                                    r * theta.cos(),
+-                                    rel_pos.y,
+-                                    r * theta.sin(),
+-                                );
++                                let theta = angle_start
++                                    + (step_i as f64 / 1000.0) * 2.0 * std::f64::consts::PI;
++                                let p_step = star_pos
++                                    + Vector3::new(r * theta.cos(), rel_pos.y, r * theta.sin());
+                                 trail.push_back(Vector3::new(
+                                     (p_step.x / au) as f32,
+                                     (p_step.y / au) as f32,
+@@ -532,9 +585,9 @@ impl AppState {
+                     }
+                     self.history_trails.push(trail);
+                 }
+-                
++
+                 self.selected_body_idx = 0;
+-                
++
+                 let positions = self.physics_engine.get_positions();
+                 let mut max_dist = 0.0;
+                 for p in positions {
+@@ -543,7 +596,7 @@ impl AppState {
+                         max_dist = dist_au;
+                     }
+                 }
+-                
++
+                 if max_dist > 0.01 {
+                     self.camera_distance = (max_dist * 1.5).clamp(2.0, 300000.0);
+                 } else {
+@@ -580,18 +633,27 @@ impl AppState {
+         // Compute camera pos to calculate distance from Earth
+         let pitch_rad = self.camera_pitch.to_radians();
+         let yaw_rad = self.camera_yaw.to_radians();
+-        let camera_pos = self.camera_target + Vector3::new(
+-            self.camera_distance * pitch_rad.cos() * yaw_rad.sin(),
+-            self.camera_distance * pitch_rad.sin(),
+-            self.camera_distance * pitch_rad.cos() * yaw_rad.cos(),
+-        );
++        let camera_pos = self.camera_target
++            + Vector3::new(
++                self.camera_distance * pitch_rad.cos() * yaw_rad.sin(),
++                self.camera_distance * pitch_rad.sin(),
++                self.camera_distance * pitch_rad.cos() * yaw_rad.cos(),
++            );
+ 
+-        let earth_pos_render = if let Some(earth_idx) = self.body_names.iter().position(|name| name == "Earth") {
+-            let p_earth = base_positions.get(earth_idx).copied().unwrap_or(Vector3::zeros());
+-            Vector3::new((p_earth.x / au) as f32, (p_earth.y / au) as f32, (p_earth.z / au) as f32)
+-        } else {
+-            Vector3::zeros()
+-        };
++        let earth_pos_render =
++            if let Some(earth_idx) = self.body_names.iter().position(|name| name == "Earth") {
++                let p_earth = base_positions
++                    .get(earth_idx)
++                    .copied()
++                    .unwrap_or(Vector3::zeros());
++                Vector3::new(
++                    (p_earth.x / au) as f32,
++                    (p_earth.y / au) as f32,
++                    (p_earth.z / au) as f32,
++                )
++            } else {
++                Vector3::zeros()
++            };
+         let dist_au = (camera_pos - earth_pos_render).norm();
+ 
+         if dist_au < 0.2 {
+@@ -610,8 +672,10 @@ impl AppState {
+             self.sim_speed = 1.0 / 86400.0;
+         }
+         if !self.paused {
+-            let sim_dt = capped_dt * 86400.0 * self.sim_speed; 
+-            if self.current_scale == SimulationScale::Planetary || self.current_scale == SimulationScale::Stellar {
++            let sim_dt = capped_dt * 86400.0 * self.sim_speed;
++            if self.current_scale == SimulationScale::Planetary
++                || self.current_scale == SimulationScale::Stellar
++            {
+                 self.physics_engine.step(sim_dt);
+             }
+             self.current_jd += capped_dt * self.sim_speed;
+@@ -625,32 +689,78 @@ impl AppState {
+         let mut body_types = self.body_types.clone();
+ 
+         // Calculate Keplerian bodies' render positions
+-        if self.current_scale == SimulationScale::Planetary || self.current_scale == SimulationScale::Stellar {
++        if self.current_scale == SimulationScale::Planetary
++            || self.current_scale == SimulationScale::Stellar
++        {
+             let physical_radii = [
+-            6.9634e8,  // Sun
+-            2.4397e6,  // Mercury
+-            6.0518e6,  // Venus
+-            6.371e6,   // Earth
+-            3.3895e6,  // Mars
+-            6.9911e7,  // Jupiter
+-            5.8232e7,  // Saturn
+-            2.5362e7,  // Uranus
+-            2.4622e7,  // Neptune
+-            1.1883e6,  // Pluto
+-            4.73e5,    // Ceres
+-            1.163e6,   // Eris
+-            8.16e5,    // Haumea
+-            7.15e5,    // Makemake
+-        ];
++                6.9634e8, // Sun
++                2.4397e6, // Mercury
++                6.0518e6, // Venus
++                6.371e6,  // Earth
++                3.3895e6, // Mars
++                6.9911e7, // Jupiter
++                5.8232e7, // Saturn
++                2.5362e7, // Uranus
++                2.4622e7, // Neptune
++                1.1883e6, // Pluto
++                4.73e5,   // Ceres
++                1.163e6,  // Eris
++                8.16e5,   // Haumea
++                7.15e5,   // Makemake
++            ];
+             for body in &self.keplerian_bodies {
+-                let parent_pos = base_positions.get(body.parent_idx).copied().unwrap_or(Vector3::zeros());
+-                let parent_vel = base_velocities.get(body.parent_idx).copied().unwrap_or(Vector3::zeros());
+-                
+-                let (pos_phys, vel_phys) = crate::physics::kepler::get_keplerian_body_state(body, self.current_jd, parent_pos, parent_vel);
+-                
++                let parent_pos = base_positions
++                    .get(body.parent_idx)
++                    .copied()
++                    .unwrap_or(Vector3::zeros());
++                let parent_vel = base_velocities
++                    .get(body.parent_idx)
++                    .copied()
++                    .unwrap_or(Vector3::zeros());
++
++                #[cfg(target_arch = "wasm32")]
++                if body.name == "CUBESAT" {
++                    if let Some([x, y, z, vx, vy, vz]) = crate::cubesat_state() {
++                        let parent_scale_factor = if body.parent_idx > 0
++                            && body.parent_idx < physical_radii.len()
++                        {
++                            let visual_radius =
++                                self.body_radii
++                                    .get(body.parent_idx)
++                                    .copied()
++                                    .unwrap_or(0.0015) as f64;
++                            let physical_radius_au =
++                                physical_radii[body.parent_idx] / 1.495978707e11;
++                            visual_radius / physical_radius_au
++                        } else {
++                            1.0
++                        };
++                        let rel = Vector3::new(x, y, z) * parent_scale_factor;
++                        positions.push(parent_pos + rel);
++                        let vel = Vector3::new(vx, vy, vz) * parent_scale_factor;
++                        velocities.push(vel);
++                        masses.push(0.0);
++                        body_names.push(body.name.clone());
++                        body_radii.push(body.radius_render);
++                        body_types.push(body.body_type);
++                        continue;
++                    }
++                }
++
++                let (pos_phys, vel_phys) = crate::physics::kepler::get_keplerian_body_state(
++                    body,
++                    self.current_jd,
++                    parent_pos,
++                    parent_vel,
++                );
++
+                 let rel_pos = if body.parent_idx > 0 && body.parent_idx < physical_radii.len() {
+                     let rel_pos_phys = pos_phys - parent_pos;
+-                    let visual_radius = self.body_radii.get(body.parent_idx).copied().unwrap_or(0.0015) as f64;
++                    let visual_radius = self
++                        .body_radii
++                        .get(body.parent_idx)
++                        .copied()
++                        .unwrap_or(0.0015) as f64;
+                     let physical_radius_au = physical_radii[body.parent_idx] / 1.495978707e11;
+                     let parent_scale_factor = visual_radius / physical_radius_au;
+                     rel_pos_phys * parent_scale_factor
+@@ -658,7 +768,7 @@ impl AppState {
+                     pos_phys - parent_pos
+                 };
+                 let pos_render = parent_pos + rel_pos;
+-                
++
+                 positions.push(pos_render);
+                 velocities.push(vel_phys);
+                 masses.push(0.0);
+@@ -712,7 +822,7 @@ impl AppState {
+             let yaw_rad = self.camera_yaw.to_radians();
+             let forward = Vector3::new(yaw_rad.sin(), 0.0, yaw_rad.cos());
+             let right = Vector3::new(yaw_rad.cos(), 0.0, -yaw_rad.sin());
+-            
++
+             let move_speed = (self.camera_distance * 0.015).clamp(0.0001, 1000.0);
+             if self.pressed_keys.contains(&KeyCode::KeyW) {
+                 self.camera_target -= forward * move_speed;
+@@ -726,7 +836,7 @@ impl AppState {
+             if self.pressed_keys.contains(&KeyCode::KeyD) {
+                 self.camera_target += right * move_speed;
+             }
+-            
++
+             if self.pressed_keys.contains(&KeyCode::KeyQ) {
+                 self.camera_distance = (self.camera_distance * 1.02).clamp(0.000001, 300000.0);
+             }
+@@ -748,7 +858,7 @@ impl AppState {
+         if self.follow_camera && !positions.is_empty() {
+             let current = self.selected_body_idx.min(positions.len() - 1);
+             let p_si = positions[current];
+-            
++
+             let target_pos = Vector3::new(
+                 (p_si.x / au) as f32,
+                 (p_si.y / au) as f32,
+@@ -761,11 +871,12 @@ impl AppState {
+         let pitch_rad = self.camera_pitch.to_radians();
+         let yaw_rad = self.camera_yaw.to_radians();
+ 
+-        let camera_pos = self.camera_target + Vector3::new(
+-            self.camera_distance * pitch_rad.cos() * yaw_rad.sin(),
+-            self.camera_distance * pitch_rad.sin(),
+-            self.camera_distance * pitch_rad.cos() * yaw_rad.cos(),
+-        );
++        let camera_pos = self.camera_target
++            + Vector3::new(
++                self.camera_distance * pitch_rad.cos() * yaw_rad.sin(),
++                self.camera_distance * pitch_rad.sin(),
++                self.camera_distance * pitch_rad.cos() * yaw_rad.cos(),
++            );
+ 
+         let view = nalgebra::Matrix4::look_at_rh(
+             &nalgebra::Point3::from(camera_pos),
+@@ -783,13 +894,10 @@ impl AppState {
+         );
+ 
+         let correction = nalgebra::Matrix4::new(
+-            1.0,  0.0, 0.0, 0.0,
+-            0.0,  1.0, 0.0, 0.0,
+-            0.0,  0.0, 0.5, 0.5,
+-            0.0,  0.0, 0.0, 1.0,
++            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
+         );
+         let proj_vk = correction * proj;
+-        
++
+         let mut view_rot = view;
+         view_rot.m14 = 0.0;
+         view_rot.m24 = 0.0;
+@@ -798,28 +906,30 @@ impl AppState {
+         view_rot.m42 = 0.0;
+         view_rot.m43 = 0.0;
+         view_rot.m44 = 1.0;
+-        let inv_view_proj = (proj_vk * view_rot).try_inverse().unwrap_or_else(|| nalgebra::Matrix4::identity());
++        let inv_view_proj = (proj_vk * view_rot)
++            .try_inverse()
++            .unwrap_or_else(|| nalgebra::Matrix4::identity());
+ 
+         // 3D Raycasting Hover Check
+         let mut hovered_idx = None;
+         let mut min_t = f32::MAX;
+-        
++
+         if !self.imgui.io().want_capture_mouse {
+             let mx = self.mouse_position.0;
+             let my = self.mouse_position.1;
+-            
++
+             let x_ndc = (2.0 * mx / width as f32) - 1.0;
+             let y_ndc = 1.0 - (2.0 * my / height as f32);
+-            
++
+             let vp = proj_vk * view;
+             if let Some(inv_vp) = vp.try_inverse() {
+                 let p_near_h = inv_vp * nalgebra::Vector4::new(x_ndc, y_ndc, 0.0, 1.0);
+                 let p_far_h = inv_vp * nalgebra::Vector4::new(x_ndc, y_ndc, 1.0, 1.0);
+-                
++
+                 let p_near = p_near_h.xyz() / p_near_h.w;
+                 let p_far = p_far_h.xyz() / p_far_h.w;
+                 let ray_dir = (p_far - p_near).normalize();
+-                
++
+                 for i in 0..positions.len() {
+                     let p_si = positions[i];
+                     let pos_render = Vector3::new(
+@@ -827,37 +937,41 @@ impl AppState {
+                         (p_si.y / au) as f32,
+                         (p_si.z / au) as f32,
+                     );
+-                    
++
+                     let dx = pos_render.x - camera_pos.x;
+                     let dy = pos_render.y - camera_pos.y;
+                     let dz = pos_render.z - camera_pos.z;
+-                    let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+-                    
++                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
++
+                     let b_type = body_types.get(i).copied().unwrap_or(101);
+-                    let min_size_factor = if b_type == 0 || b_type == 100 { 
+-                        0.006 
++                    let min_size_factor = if b_type == 0 || b_type == 100 {
++                        0.006
+                     } else if b_type >= 12 && b_type <= 14 {
+                         0.0005
+                     } else if b_type == 11 {
+                         0.0008
+-                    } else { 
+-                        0.0025 
++                    } else {
++                        0.0025
+                     };
+-                    let visual_radius = body_radii.get(i).copied().unwrap_or(0.001).max(dist * min_size_factor);
+-                    
++                    let visual_radius = body_radii
++                        .get(i)
++                        .copied()
++                        .unwrap_or(0.001)
++                        .max(dist * min_size_factor);
++
+                     let v = pos_render - p_near;
+                     let t_proj = v.dot(&ray_dir);
+                     if t_proj > 0.0 {
+-                         let d2 = v.norm_squared() - t_proj * t_proj;
+-                         let r2 = visual_radius * visual_radius;
+-                         let select_margin = 1.35;
+-                         if d2 <= r2 * select_margin {
+-                             let t_hit = t_proj - (r2 * select_margin - d2).sqrt();
+-                             if t_hit < min_t {
+-                                 min_t = t_hit;
+-                                 hovered_idx = Some(i);
+-                             }
+-                         }
++                        let d2 = v.norm_squared() - t_proj * t_proj;
++                        let r2 = visual_radius * visual_radius;
++                        let select_margin = 1.35;
++                        if d2 <= r2 * select_margin {
++                            let t_hit = t_proj - (r2 * select_margin - d2).sqrt();
++                            if t_hit < min_t {
++                                min_t = t_hit;
++                                hovered_idx = Some(i);
++                            }
++                        }
+                     }
+                 }
+             }
+@@ -876,9 +990,10 @@ impl AppState {
+                 (p_si.y / au) as f32,
+                 (p_si.z / au) as f32,
+             );
+-            
++
+             if i >= self.history_trails.len() {
+-                self.history_trails.push(std::collections::VecDeque::with_capacity(1000));
++                self.history_trails
++                    .push(std::collections::VecDeque::with_capacity(1000));
+             }
+             let trail = &mut self.history_trails[i];
+             trail.push_back(p_render);
+@@ -894,6 +1009,11 @@ impl AppState {
+         let mut zoom_to_galaxy = false;
+         let mut zoom_to_system = false;
+         let mut zoom_to_parent: Option<String> = None;
++        let mut cubesat_mode: Option<bool> = None;
++        #[cfg(target_arch = "wasm32")]
++        if let Some(mode) = crate::take_cubesat_mode() {
++            cubesat_mode = Some(mode == 0);
++        }
+ 
+         let active_system_name = self.active_system_name.clone();
+         let mut selected_body_idx = self.selected_body_idx;
+@@ -902,7 +1022,9 @@ impl AppState {
+         let body_names = body_names.clone();
+ 
+         #[cfg(not(target_arch = "wasm32"))]
+-        self.platform.prepare_frame(self.imgui.io_mut(), &self.window).unwrap();
++        self.platform
++            .prepare_frame(self.imgui.io_mut(), &self.window)
++            .unwrap();
+         #[cfg(target_arch = "wasm32")]
+         {
+             self.imgui.io_mut().display_size = [width as f32, height as f32];
+@@ -927,23 +1049,26 @@ impl AppState {
+                 let draw_list = ui.get_background_draw_list();
+                 let joy_center = [self.joystick_center.0, self.joystick_center.1];
+                 let base_radius = 50.0;
+-                
++
+                 // Draw transparent base circle
+-                draw_list.add_circle(joy_center, base_radius, [1.0, 1.0, 1.0, 0.15])
++                draw_list
++                    .add_circle(joy_center, base_radius, [1.0, 1.0, 1.0, 0.15])
+                     .thickness(3.0)
+                     .build();
+-                    
++
+                 // Draw transparent outer glow ring
+-                draw_list.add_circle(joy_center, base_radius + 5.0, [1.0, 1.0, 1.0, 0.05])
++                draw_list
++                    .add_circle(joy_center, base_radius + 5.0, [1.0, 1.0, 1.0, 0.05])
+                     .thickness(1.5)
+                     .build();
+-                
++
+                 // Draw knob offset by joystick_delta
+                 let knob_pos = [
+                     self.joystick_center.0 + self.joystick_delta.0 * base_radius,
+                     self.joystick_center.1 + self.joystick_delta.1 * base_radius,
+                 ];
+-                draw_list.add_circle(knob_pos, 20.0, [1.0, 1.0, 1.0, 0.35])
++                draw_list
++                    .add_circle(knob_pos, 20.0, [1.0, 1.0, 1.0, 0.35])
+                     .filled(true)
+                     .build();
+             }
+@@ -962,38 +1087,47 @@ impl AppState {
+                     .build(|| {
+                         ui.text("/");
+                         ui.same_line();
+-                        
++
+                         if ui.button("Milky Way Galaxy") {
+                             zoom_to_galaxy = true;
+                         }
+-                        
++
+                         // Show system if we are zoomed in past Interstellar scale
+                         if self.current_scale != SimulationScale::Interstellar {
+                             ui.same_line();
+                             ui.text("/");
+                             ui.same_line();
+-                            
++
+                             let system_name = if active_system_name.is_empty() {
+                                 "Solar System"
+                             } else {
+                                 &active_system_name
+                             };
+-                            
++
+                             if ui.button(system_name) {
+                                 zoom_to_system = true;
+                             }
+-                            
++
+                             // Show closest body if we are close to it (min_dist_au < 2.5 AU)
+                             if self.min_dist_au < 2.5 {
+                                 if let Some(closest_name) = body_names.get(self.closest_body_idx) {
+                                     if closest_name != system_name && closest_name != "Sun" {
+                                         // Check if this body is a keplerian body (moon/satellite) with a parent
+-                                        let parent_name = if let Some(k_body) = self.keplerian_bodies.iter().find(|b| &b.name == closest_name) {
+-                                            Some(body_names.get(k_body.parent_idx).cloned().unwrap_or_else(|| "Sun".to_string()))
++                                        let parent_name = if let Some(k_body) = self
++                                            .keplerian_bodies
++                                            .iter()
++                                            .find(|b| &b.name == closest_name)
++                                        {
++                                            Some(
++                                                body_names
++                                                    .get(k_body.parent_idx)
++                                                    .cloned()
++                                                    .unwrap_or_else(|| "Sun".to_string()),
++                                            )
+                                         } else {
+                                             None
+                                         };
+-                                        
++
+                                         if let Some(ref parent) = parent_name {
+                                             // It is a moon: show parent planet, then show moon
+                                             ui.same_line();
+@@ -1002,7 +1136,7 @@ impl AppState {
+                                             if ui.button(parent) {
+                                                 zoom_to_parent = Some(parent.clone());
+                                             }
+-                                            
++
+                                             // Only append the moon leaf name dynamically if we are extremely close (min_dist_au < 0.15 AU)
+                                             if self.min_dist_au < 0.15 {
+                                                 ui.same_line();
+@@ -1045,32 +1179,65 @@ impl AppState {
+             let mut paused = self.paused;
+             let mut sim_speed = self.sim_speed as f32;
+             let mut visual_warp = self.visual_warp_factor;
+-            
++
++            ui.window("Live CubeSat")
++                .position([width as f32 - 300.0, 180.0], imgui::Condition::Always)
++                .size([290.0, 150.0], imgui::Condition::Always)
++                .bg_alpha(0.55)
++                .build(|| {
++                    if ui.button("Earth (specific)") {
++                        cubesat_mode = Some(true);
++                    }
++                    ui.same_line();
++                    if ui.button("Universe (big picture)") {
++                        cubesat_mode = Some(false);
++                    }
++                    ui.separator();
++                    #[cfg(target_arch = "wasm32")]
++                    {
++                        if let Some([x, y, z, vx, vy, vz]) = crate::cubesat_state() {
++                            let r = (x * x + y * y + z * z).sqrt();
++                            let v = (vx * vx + vy * vy + vz * vz).sqrt();
++                            ui.text(format!("ALT  {:.1} km", r / 1000.0 - 6371.0));
++                            ui.text(format!("SPD  {:.3} km/s", v / 1000.0));
++                            ui.text("live · F\' / CSPICE");
++                        } else {
++                            ui.text("bridge offline");
++                        }
++                    }
++                    #[cfg(not(target_arch = "wasm32"))]
++                    ui.text("live bridge: wasm only");
++                });
++
+             ui.window("Simulation Control Panel")
+                 .size([320.0, 240.0], imgui::Condition::FirstUseEver)
+                 .build(|| {
+                     ui.text("AstroSim Solar System Controller");
+                     ui.separator();
+-                    
++
+                     ui.checkbox("Pause Simulation", &mut paused);
+-                    
++
+                     let mut realtime = self.realtime_speed;
+                     if ui.checkbox("Real-Time Orbit Speed (1x)", &mut realtime) {
+                         self.realtime_speed = realtime;
+                     }
+-                    
++
+                     if self.realtime_speed {
+                         ui.text_disabled("Sim Speed: Locked to 1.0x Real-Time");
+                     } else {
+                         ui.slider("Sim Speed (Days/Sec)", 0.0, 100.0, &mut sim_speed);
+                     }
+-                    
++
+                     ui.slider("Gravity Well Warp", 0.01, 10.0, &mut visual_warp);
+-                    
++
+                     if !self.keplerian_bodies.is_empty() {
+-                        let (y, m, d, h, min) = crate::physics::kepler::jd_to_calendar(self.current_jd);
++                        let (y, m, d, h, min) =
++                            crate::physics::kepler::jd_to_calendar(self.current_jd);
+                         ui.separator();
+-                        ui.text(format!("Sim Date: {:04}-{:02}-{:02} {:02}:{:02}", y, m, d, h, min));
++                        ui.text(format!(
++                            "Sim Date: {:04}-{:02}-{:02} {:02}:{:02}",
++                            y, m, d, h, min
++                        ));
+                     }
+ 
+                     ui.separator();
+@@ -1079,7 +1246,7 @@ impl AppState {
+                     ui.text("- WASD: Pan center position");
+                     ui.text("- Scroll or Q/E: Zoom in/out");
+                 });
+-            
++
+             self.paused = paused;
+             if !self.realtime_speed {
+                 self.sim_speed = sim_speed as f64;
+@@ -1090,9 +1257,11 @@ impl AppState {
+             ui.window("Entity Inspector")
+                 .size([380.0, 310.0], imgui::Condition::FirstUseEver)
+                 .build(|| {
+-                    if body_names.is_empty() { return; }
++                    if body_names.is_empty() {
++                        return;
++                    }
+                     let mut current = selected_body_idx.min(body_names.len() - 1);
+-                    
++
+                     if let Some(_token) = ui.begin_combo("Select Entity", &body_names[current]) {
+                         for i in 0..body_names.len() {
+                             if i < physics_bodies_len || i == current {
+@@ -1113,7 +1282,7 @@ impl AppState {
+                         }
+                     }
+                     selected_body_idx = current;
+-                    
++
+                     ui.same_line();
+                     if ui.checkbox("Follow Camera", &mut follow_camera) {
+                         if follow_camera {
+@@ -1127,87 +1296,104 @@ impl AppState {
+                             };
+                         }
+                     }
+-                    
++
+                     ui.separator();
+-                    
++
+                     let p = positions[current];
+                     let v = velocities[current];
+                     let m = masses[current];
+-                    
++
+                     if current >= physics_bodies_len {
+                         // Keplerian Body Inspector
+                         let k_idx = current - physics_bodies_len;
+                         let k_body = &self.keplerian_bodies[k_idx];
+-                        
++
+                         ui.text(format!("Inspect: {} (Analytical)", k_body.name));
+                         ui.separator();
+-                        
++
+                         if k_body.parent_idx == 0 {
+                             ui.text(format!("Parent: Sun"));
+                             ui.text(format!("Distance from Sun: {:.4} AU", p.norm() / au));
+                         } else {
+-                            let parent_name = body_names.get(k_body.parent_idx).cloned().unwrap_or("Unknown".to_string());
++                            let parent_name = body_names
++                                .get(k_body.parent_idx)
++                                .cloned()
++                                .unwrap_or("Unknown".to_string());
+                             ui.text(format!("Parent: {}", parent_name));
+                             let physical_radii = [
+-                                6.9634e8,  // Sun
+-                                2.4397e6,  // Mercury
+-                                6.0518e6,  // Venus
+-                                6.371e6,   // Earth
+-                                3.3895e6,  // Mars
+-                                6.9911e7,  // Jupiter
+-                                5.8232e7,  // Saturn
+-                                2.5362e7,  // Uranus
+-                                2.4622e7,  // Neptune
+-                                1.1883e6,  // Pluto
+-                                4.73e5,    // Ceres
+-                                1.163e6,   // Eris
+-                                8.16e5,    // Haumea
+-                                7.15e5,    // Makemake
++                                6.9634e8, // Sun
++                                2.4397e6, // Mercury
++                                6.0518e6, // Venus
++                                6.371e6,  // Earth
++                                3.3895e6, // Mars
++                                6.9911e7, // Jupiter
++                                5.8232e7, // Saturn
++                                2.5362e7, // Uranus
++                                2.4622e7, // Neptune
++                                1.1883e6, // Pluto
++                                4.73e5,   // Ceres
++                                1.163e6,  // Eris
++                                8.16e5,   // Haumea
++                                7.15e5,   // Makemake
+                             ];
+-                            let parent_radius = physical_radii.get(k_body.parent_idx).copied().unwrap_or(6371000.0);
++                            let parent_radius = physical_radii
++                                .get(k_body.parent_idx)
++                                .copied()
++                                .unwrap_or(6371000.0);
+                             let alt_km = (k_body.semi_major_axis - parent_radius) / 1000.0;
+                             ui.text(format!("Altitude: {:.1} km", alt_km));
+                         }
+-                        
++
+                         ui.text(format!("Orbital Period: {:.1} min", k_body.period / 60.0));
+                         ui.text(format!("Eccentricity: {:.5}", k_body.eccentricity));
+-                        ui.text(format!("Inclination: {:.2} deg", k_body.inclination.to_degrees()));
++                        ui.text(format!(
++                            "Inclination: {:.2} deg",
++                            k_body.inclination.to_degrees()
++                        ));
+                         ui.text(format!("Velocity: {:.2} km/s", v.norm() / 1000.0));
+                     } else {
+                         // Physical Body Inspector
+                         ui.text(format!("Inspect: {}", body_names[current]));
+                         ui.text(format!("Distance from Star: {:.4} AU", p.norm() / au));
+                         ui.text(format!("Velocity: {:.2} km/s", v.norm() / 1000.0));
+-                        
++
+                         ui.separator();
+-                        
+-                        let mut pos_au = [ (p.x / au) as f32, (p.y / au) as f32, (p.z / au) as f32 ];
+-                        let mut vel_kms = [ (v.x / 1000.0) as f32, (v.y / 1000.0) as f32, (v.z / 1000.0) as f32 ];
+-                        
++
++                        let mut pos_au = [(p.x / au) as f32, (p.y / au) as f32, (p.z / au) as f32];
++                        let mut vel_kms = [
++                            (v.x / 1000.0) as f32,
++                            (v.y / 1000.0) as f32,
++                            (v.z / 1000.0) as f32,
++                        ];
++
+                         let mut mass_scale = if current == 0 {
+                             (m / m_sun) as f32
+                         } else {
+                             (m / m_earth) as f32
+                         };
+-                        
++
+                         let unit_label = if current == 0 { "M_solar" } else { "M_earth" };
+-                        
++
+                         let mut pos_changed = false;
+                         let mut vel_changed = false;
+                         let mut mass_changed = false;
+-                        
++
+                         if ui.input_float3("Position (AU)", &mut pos_au).build() {
+                             pos_changed = true;
+                         }
+                         if ui.input_float3("Velocity (km/s)", &mut vel_kms).build() {
+                             vel_changed = true;
+                         }
+-                        
++
+                         let mass_label = format!("Mass ({})", unit_label);
+-                        if ui.input_float(mass_label, &mut mass_scale).step(0.1).build() {
++                        if ui
++                            .input_float(mass_label, &mut mass_scale)
++                            .step(0.1)
++                            .build()
++                        {
+                             mass_changed = true;
+                         }
+-                        
++
+                         if pos_changed || vel_changed || mass_changed {
+                             let new_pos = Vector3::new(
+                                 pos_au[0] as f64 * au,
+@@ -1226,7 +1412,7 @@ impl AppState {
+                             };
+                             edit_body = Some((current, new_pos, new_vel, new_mass));
+                         }
+-                        
++
+                         ui.separator();
+                         if ui.button("Restore Circular Orbit") {
+                             restore_circular = true;
+@@ -1235,7 +1421,7 @@ impl AppState {
+                         // Add ASTER Assistant inside Entity Inspector
+                         ui.separator();
+                         ui.text("ASTER Scientific Assistant:");
+-                        
++
+                         // Scrollable child window for chat history
+                         ui.child_window("ChatLog")
+                             .size([360.0, 100.0])
+@@ -1247,16 +1433,24 @@ impl AppState {
+                                     }
+                                 }
+                             });
+-                        
++
+                         // Input box and send button
+                         let mut chat_in = self.chatbot_input.clone();
+                         ui.set_next_item_width(280.0);
+-                        if ui.input_text("##Message", &mut chat_in).enter_returns_true(true).build() {
++                        if ui
++                            .input_text("##Message", &mut chat_in)
++                            .enter_returns_true(true)
++                            .build()
++                        {
+                             if !chat_in.trim().is_empty() {
+                                 if let Ok(mut hist) = self.chatbot_history.lock() {
+                                     hist.push(format!("You: {}", chat_in));
+                                 }
+-                                send_to_aster(chat_in.clone(), "user_session_1".to_string(), Arc::clone(&self.chatbot_history));
++                                send_to_aster(
++                                    chat_in.clone(),
++                                    "user_session_1".to_string(),
++                                    Arc::clone(&self.chatbot_history),
++                                );
+                                 chat_in.clear();
+                             }
+                         }
+@@ -1266,7 +1460,11 @@ impl AppState {
+                                 if let Ok(mut hist) = self.chatbot_history.lock() {
+                                     hist.push(format!("You: {}", chat_in));
+                                 }
+-                                send_to_aster(chat_in.clone(), "user_session_1".to_string(), Arc::clone(&self.chatbot_history));
++                                send_to_aster(
++                                    chat_in.clone(),
++                                    "user_session_1".to_string(),
++                                    Arc::clone(&self.chatbot_history),
++                                );
+                                 chat_in.clear();
+                             }
+                         }
+@@ -1317,7 +1515,11 @@ impl AppState {
+ 
+                     ui.separator();
+                     ui.text("Search NASA Exoplanet Archive:");
+-                    if ui.input_text("Star Name", &mut search_query).enter_returns_true(true).build() {
++                    if ui
++                        .input_text("Star Name", &mut search_query)
++                        .enter_returns_true(true)
++                        .build()
++                    {
+                         action_fetch_star = Some(search_query.clone());
+                     }
+                     ui.same_line();
+@@ -1327,7 +1529,7 @@ impl AppState {
+ 
+                     ui.text(format!("Status: {}", fetch_status));
+                 });
+-            
++
+             self.search_query = search_query;
+ 
+             // 4. Hover floating text label above mouse cursor
+@@ -1390,7 +1592,36 @@ impl AppState {
+         self.follow_camera = follow_camera;
+         self.camera_distance = camera_distance;
+ 
+-        if zoom_to_galaxy {
++        if let Some(earth_mode) = cubesat_mode {
++            if earth_mode {
++                // Satellites are appended to the render list after the base
++                // bodies, in keplerian_bodies order. Target it directly: the
++                // follow-camera path is for the N-body primaries.
++                let base = self.body_names.len();
++                if let Some(k) = self.keplerian_bodies.iter().position(|b| b.name == "CUBESAT") {
++                    let idx = base + k;
++                    if idx < positions.len() {
++                        let p = positions[idx];
++                        self.camera_target = Vector3::new(
++                            (p.x / au) as f32,
++                            (p.y / au) as f32,
++                            (p.z / au) as f32,
++                        );
++                        self.follow_camera = false;
++                        self.selected_body_idx = idx;
++                        self.camera_distance = 0.0004;
++                    }
++                } else if let Some(idx) = self.body_names.iter().position(|name| name == "Earth") {
++                    self.selected_body_idx = idx;
++                    self.follow_camera = true;
++                    self.camera_distance = 0.02;
++                }
++            } else {
++                self.camera_target = Vector3::new(0.0, 0.0, -12000.0);
++                self.camera_distance = 65000.0;
++                self.follow_camera = false;
++            }
++        } else if zoom_to_galaxy {
+             self.camera_target = Vector3::new(0.0, 0.0, -12000.0);
+             self.camera_distance = 65000.0;
+             self.follow_camera = false;
+@@ -1414,7 +1645,8 @@ impl AppState {
+         }
+ 
+         if let Some((idx, new_pos, new_vel, new_mass)) = edit_body {
+-            self.physics_engine.set_body(idx, new_pos, new_vel, new_mass);
++            self.physics_engine
++                .set_body(idx, new_pos, new_vel, new_mass);
+         }
+ 
+         if restore_circular {
+@@ -1434,7 +1666,8 @@ impl AppState {
+                         Vector3::new(-p.z, 0.0, p.x).normalize()
+                     };
+                     let new_vel = dir * v_mag;
+-                    self.physics_engine.set_body(current, p, new_vel, masses[current]);
++                    self.physics_engine
++                        .set_body(current, p, new_vel, masses[current]);
+                 }
+             }
+         }
+@@ -1453,9 +1686,9 @@ impl AppState {
+             let m = masses[i];
+             let relative_mass = m / m_earth;
+             let log_mass = (relative_mass + 1.0).log10();
+-            
++
+             let strength = self.visual_warp_factor * (log_mass as f32) * 0.15;
+-            
++
+             body_ubos.push(BodyUbo {
+                 pos_mass: [p_render.x, p_render.y, p_render.z, strength],
+             });
+@@ -1488,59 +1721,72 @@ impl AppState {
+             body_colors.push(col);
+         }
+ 
+-        let trails: Vec<Vec<[f32; 2]>> = self.history_trails.iter().map(|trail| {
+-            trail.iter().map(|p| [p.x, p.z]).collect()
+-        }).collect();
++        let trails: Vec<Vec<[f32; 2]>> = self
++            .history_trails
++            .iter()
++            .map(|trail| trail.iter().map(|p| [p.x, p.z]).collect())
++            .collect();
+ 
+         // Filter elements depending on SimulationScale
+-        let (filtered_ubos, filtered_radii, filtered_types, filtered_colors, filtered_trails) = if self.current_scale == SimulationScale::Galactic {
+-            let mut ubos = Vec::new();
+-            let mut radii = Vec::new();
+-            let mut types = Vec::new();
+-            let mut colors = Vec::new();
+-            
+-            // Draw center black hole / star if present
+-            if !body_types.is_empty() && (body_types[0] == 20 || body_types[0] == 21) {
+-                ubos.push(body_ubos[0]);
+-                radii.push(body_radii[0]);
+-                types.push(body_types[0]);
+-                colors.push(body_colors[0]);
+-            } else {
+-                // Sagittarius A* center at [0.0, 0.0, -12000.0]
+-                let sgr_pos = [0.0, 0.0, -12000.0, 1.5]; // [x, y, z, strength]
+-                ubos.push(BodyUbo { pos_mass: sgr_pos });
+-                radii.push(120.0); // visible event horizon + accretion disk visual size
+-                types.push(20); // Black Hole
+-                colors.push([0.1, 0.1, 0.1, 1.0]);
+-            }
+-            
+-            (ubos, radii, types, colors, vec![])
+-        } else if self.current_scale == SimulationScale::Interstellar {
+-            // Draw only host stars
+-            let mut ubos = Vec::new();
+-            let mut radii = Vec::new();
+-            let mut types = Vec::new();
+-            let mut colors = Vec::new();
+-            for i in 0..body_ubos.len() {
+-                let t = body_types.get(i).copied().unwrap_or(101);
+-                if t == 0 || t == 100 || t == 20 || t == 21 {
+-                    ubos.push(body_ubos[i]);
+-                    radii.push(body_radii[i]);
+-                    types.push(body_types[i]);
+-                    colors.push(body_colors[i]);
++        let (filtered_ubos, filtered_radii, filtered_types, filtered_colors, filtered_trails) =
++            if self.current_scale == SimulationScale::Galactic {
++                let mut ubos = Vec::new();
++                let mut radii = Vec::new();
++                let mut types = Vec::new();
++                let mut colors = Vec::new();
++
++                // Draw center black hole / star if present
++                if !body_types.is_empty() && (body_types[0] == 20 || body_types[0] == 21) {
++                    ubos.push(body_ubos[0]);
++                    radii.push(body_radii[0]);
++                    types.push(body_types[0]);
++                    colors.push(body_colors[0]);
++                } else {
++                    // Sagittarius A* center at [0.0, 0.0, -12000.0]
++                    let sgr_pos = [0.0, 0.0, -12000.0, 1.5]; // [x, y, z, strength]
++                    ubos.push(BodyUbo { pos_mass: sgr_pos });
++                    radii.push(120.0); // visible event horizon + accretion disk visual size
++                    types.push(20); // Black Hole
++                    colors.push([0.1, 0.1, 0.1, 1.0]);
+                 }
+-            }
+-            (ubos, radii, types, colors, vec![])
+-        } else {
+-            (body_ubos, body_radii.clone(), body_types.clone(), body_colors, trails)
+-        };
+ 
+-        let sel_idx = if self.current_scale == SimulationScale::Planetary || self.current_scale == SimulationScale::Stellar {
++                (ubos, radii, types, colors, vec![])
++            } else if self.current_scale == SimulationScale::Interstellar {
++                // Draw only host stars
++                let mut ubos = Vec::new();
++                let mut radii = Vec::new();
++                let mut types = Vec::new();
++                let mut colors = Vec::new();
++                for i in 0..body_ubos.len() {
++                    let t = body_types.get(i).copied().unwrap_or(101);
++                    if t == 0 || t == 100 || t == 20 || t == 21 {
++                        ubos.push(body_ubos[i]);
++                        radii.push(body_radii[i]);
++                        types.push(body_types[i]);
++                        colors.push(body_colors[i]);
++                    }
++                }
++                (ubos, radii, types, colors, vec![])
++            } else {
++                (
++                    body_ubos,
++                    body_radii.clone(),
++                    body_types.clone(),
++                    body_colors,
++                    trails,
++                )
++            };
++
++        let sel_idx = if self.current_scale == SimulationScale::Planetary
++            || self.current_scale == SimulationScale::Stellar
++        {
+             self.selected_body_idx
+         } else {
+             9999
+         };
+-        let hov_idx = if self.current_scale == SimulationScale::Planetary || self.current_scale == SimulationScale::Stellar {
++        let hov_idx = if self.current_scale == SimulationScale::Planetary
++            || self.current_scale == SimulationScale::Stellar
++        {
+             self.hovered_body_idx
+         } else {
+             None
+@@ -1591,49 +1837,60 @@ impl ApplicationHandler for AstroSimApp {
+         #[cfg(not(target_arch = "wasm32"))]
+         {
+             if self.state.is_none() {
+-                let window = Arc::new(event_loop.create_window(
+-                    Window::default_attributes()
+-                        .with_title("High-Performance Astrophysics Simulator")
+-                        .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
+-                ).unwrap());
+-                
+-                let state = pollster::block_on(AppState::new(window)).expect("Failed to initialize AppState");
++                let window = Arc::new(
++                    event_loop
++                        .create_window(
++                            Window::default_attributes()
++                                .with_title("High-Performance Astrophysics Simulator")
++                                .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
++                        )
++                        .unwrap(),
++                );
++
++                let state = pollster::block_on(AppState::new(window))
++                    .expect("Failed to initialize AppState");
+                 self.state = Some(state);
+             }
+         }
+-        
++
+         #[cfg(target_arch = "wasm32")]
+         {
+             if self.state.is_none() && !self.initializing {
+                 self.initializing = true;
+-                
+-                let window = Arc::new(event_loop.create_window(
+-                    Window::default_attributes()
+-                        .with_title("AstroSim Browser Port")
+-                ).unwrap());
+-                
++
++                let window = Arc::new(
++                    event_loop
++                        .create_window(
++                            Window::default_attributes().with_title("AstroSim Browser Port"),
++                        )
++                        .unwrap(),
++                );
++
+                 // Mount canvas to DOM
+                 let web_window = web_sys::window().expect("No global window found");
+                 let document = web_window.document().expect("No global document found");
+                 let body = document.body().expect("No body element found");
+-                
++
+                 #[allow(deprecated)]
+                 use winit::platform::web::WindowExtWebSys;
+                 let canvas = window.canvas().expect("Failed to retrieve winit canvas");
+-                
++
+                 canvas.set_id("astrosim-canvas");
+                 canvas.set_width(1280);
+                 canvas.set_height(720);
+-                
+-                canvas.style().set_property("background-color", "black").unwrap();
++
++                canvas
++                    .style()
++                    .set_property("background-color", "black")
++                    .unwrap();
+                 canvas.style().set_property("display", "block").unwrap();
+-                
++
+                 if let Some(container) = document.get_element_by_id("app-container") {
+                     container.append_child(&canvas).unwrap();
+                 } else {
+                     body.append_child(&canvas).unwrap();
+                 }
+-                
++
+                 let async_state = self.async_state.clone();
+                 wasm_bindgen_futures::spawn_local(async move {
+                     log::info!("Starting async AppState initialization...");
+@@ -1650,8 +1907,13 @@ impl ApplicationHandler for AstroSimApp {
+             }
+         }
+     }
+-    
+-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
++
++    fn window_event(
++        &mut self,
++        event_loop: &ActiveEventLoop,
++        window_id: WindowId,
++        event: WindowEvent,
++    ) {
+         #[cfg(target_arch = "wasm32")]
+         {
+             if self.state.is_none() {
+@@ -1662,16 +1924,16 @@ impl ApplicationHandler for AstroSimApp {
+                 }
+             }
+         }
+-        
++
+         let state = match &mut self.state {
+             Some(s) => s,
+             None => return,
+         };
+-        
++
+         if window_id != state.window.id() {
+             return;
+         }
+-        
++
+         // Pass event to ImGui
+         #[cfg(not(target_arch = "wasm32"))]
+         {
+@@ -1679,7 +1941,9 @@ impl ApplicationHandler for AstroSimApp {
+                 window_id,
+                 event: event.clone(),
+             };
+-            state.platform.handle_event(state.imgui.io_mut(), &state.window, &winit_event);
++            state
++                .platform
++                .handle_event(state.imgui.io_mut(), &state.window, &winit_event);
+         }
+         #[cfg(target_arch = "wasm32")]
+         {
+@@ -1688,7 +1952,11 @@ impl ApplicationHandler for AstroSimApp {
+                 WindowEvent::CursorMoved { position, .. } => {
+                     io.add_mouse_pos_event([position.x as f32, position.y as f32]);
+                 }
+-                WindowEvent::MouseInput { state: button_state, button, .. } => {
++                WindowEvent::MouseInput {
++                    state: button_state,
++                    button,
++                    ..
++                } => {
+                     let pressed = button_state.is_pressed();
+                     let imgui_button = match button {
+                         MouseButton::Left => {
+@@ -1709,11 +1977,15 @@ impl ApplicationHandler for AstroSimApp {
+                 WindowEvent::MouseWheel { delta, .. } => {
+                     let (x, y) = match delta {
+                         MouseScrollDelta::LineDelta(x, y) => (*x, *y),
+-                        MouseScrollDelta::PixelDelta(pos) => (pos.x as f32 / 120.0, pos.y as f32 / 120.0),
++                        MouseScrollDelta::PixelDelta(pos) => {
++                            (pos.x as f32 / 120.0, pos.y as f32 / 120.0)
++                        }
+                     };
+                     io.add_mouse_wheel_event([x, y]);
+                 }
+-                WindowEvent::KeyboardInput { event: key_event, .. } => {
++                WindowEvent::KeyboardInput {
++                    event: key_event, ..
++                } => {
+                     let pressed = key_event.state.is_pressed();
+                     if let PhysicalKey::Code(keycode) = key_event.physical_key {
+                         if let Some(imgui_key) = map_winit_key_to_imgui(keycode) {
+@@ -1766,7 +2038,8 @@ impl ApplicationHandler for AstroSimApp {
+                             let old_pos = state.touch_positions.insert(id, (x, y));
+ 
+                             if state.touch_positions.len() == 2 {
+-                                let coords: Vec<&(f32, f32)> = state.touch_positions.values().collect();
++                                let coords: Vec<&(f32, f32)> =
++                                    state.touch_positions.values().collect();
+                                 let dx = coords[0].0 - coords[1].0;
+                                 let dy = coords[0].1 - coords[1].1;
+                                 let dist = (dx * dx + dy * dy).sqrt();
+@@ -1774,7 +2047,8 @@ impl ApplicationHandler for AstroSimApp {
+                                 if let Some(prev_dist) = state.last_pinch_dist {
+                                     if prev_dist > 0.0 && dist > 0.0 {
+                                         let ratio = prev_dist / dist;
+-                                        state.camera_distance = (state.camera_distance * ratio).clamp(0.000001, 300000.0);
++                                        state.camera_distance = (state.camera_distance * ratio)
++                                            .clamp(0.000001, 300000.0);
+                                     }
+                                 }
+                                 state.last_pinch_dist = Some(dist);
+@@ -1788,7 +2062,7 @@ impl ApplicationHandler for AstroSimApp {
+                                         let travel = dist_joy.min(max_travel);
+                                         state.joystick_delta = (
+                                             (dx_joy / dist_joy) * (travel / max_travel),
+-                                            (dy_joy / dist_joy) * (travel / max_travel)
++                                            (dy_joy / dist_joy) * (travel / max_travel),
+                                         );
+                                     } else {
+                                         state.joystick_delta = (0.0, 0.0);
+@@ -1798,7 +2072,8 @@ impl ApplicationHandler for AstroSimApp {
+                                         let dx = x - ox;
+                                         let dy = y - oy;
+                                         state.camera_yaw += dx * 0.15;
+-                                        state.camera_pitch = (state.camera_pitch + dy * 0.15).clamp(-85.0, 85.0);
++                                        state.camera_pitch =
++                                            (state.camera_pitch + dy * 0.15).clamp(-85.0, 85.0);
+                                     }
+                                 }
+                             }
+@@ -1828,7 +2103,6 @@ impl ApplicationHandler for AstroSimApp {
+             }
+         }
+ 
+-        
+         match event {
+             WindowEvent::CloseRequested => {
+                 event_loop.exit();
+@@ -1837,7 +2111,9 @@ impl ApplicationHandler for AstroSimApp {
+                 state.renderer.resize(new_size.width, new_size.height);
+                 state.window.request_redraw();
+             }
+-            WindowEvent::KeyboardInput { event: key_event, .. } => {
++            WindowEvent::KeyboardInput {
++                event: key_event, ..
++            } => {
+                 if let PhysicalKey::Code(keycode) = key_event.physical_key {
+                     if key_event.state.is_pressed() {
+                         state.pressed_keys.insert(keycode);
+@@ -1850,27 +2126,29 @@ impl ApplicationHandler for AstroSimApp {
+                 let dx = position.x as f32 - state.mouse_position.0;
+                 let dy = position.y as f32 - state.mouse_position.1;
+                 state.mouse_position = (position.x as f32, position.y as f32);
+-                
++
+                 if state.right_mouse_down && !state.imgui.io().want_capture_mouse {
+                     state.camera_yaw += dx * 0.25;
+                     state.camera_pitch = (state.camera_pitch + dy * 0.25).clamp(-85.0, 85.0);
+                 }
+             }
+-            WindowEvent::MouseInput { state: button_state, button, .. } => {
+-                match button {
+-                    MouseButton::Left => {
+-                        if button_state.is_pressed() {
+-                            if !state.imgui.io().want_capture_mouse {
+-                                state.left_click_occurred = true;
+-                            }
++            WindowEvent::MouseInput {
++                state: button_state,
++                button,
++                ..
++            } => match button {
++                MouseButton::Left => {
++                    if button_state.is_pressed() {
++                        if !state.imgui.io().want_capture_mouse {
++                            state.left_click_occurred = true;
+                         }
+                     }
+-                    MouseButton::Right => {
+-                        state.right_mouse_down = button_state.is_pressed();
+-                    }
+-                    _ => {}
+                 }
+-            }
++                MouseButton::Right => {
++                    state.right_mouse_down = button_state.is_pressed();
++                }
++                _ => {}
++            },
+             WindowEvent::MouseWheel { delta, .. } => {
+                 if !state.imgui.io().want_capture_mouse {
+                     let y = match delta {
+@@ -1878,9 +2156,11 @@ impl ApplicationHandler for AstroSimApp {
+                         MouseScrollDelta::PixelDelta(pos) => (pos.y / 30.0) as f32,
+                     };
+                     if y > 0.0 {
+-                        state.camera_distance = (state.camera_distance * 0.85_f32.powf(y)).clamp(0.00001, 300.0);
++                        state.camera_distance =
++                            (state.camera_distance * 0.85_f32.powf(y)).clamp(0.00001, 300.0);
+                     } else if y < 0.0 {
+-                        state.camera_distance = (state.camera_distance * 1.15_f32.powf(-y)).clamp(0.00001, 300.0);
++                        state.camera_distance =
++                            (state.camera_distance * 1.15_f32.powf(-y)).clamp(0.00001, 300.0);
+                     }
+                 }
+             }
+@@ -1891,7 +2171,7 @@ impl ApplicationHandler for AstroSimApp {
+             _ => {}
+         }
+     }
+-    
++
+     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+         #[cfg(target_arch = "wasm32")]
+         {
+@@ -1903,7 +2183,7 @@ impl ApplicationHandler for AstroSimApp {
+                 }
+             }
+         }
+-        
++
+         if let Some(state) = &self.state {
+             state.window.request_redraw();
+         }
+@@ -1914,7 +2194,14 @@ impl ApplicationHandler for AstroSimApp {
+ #[cfg(not(target_arch = "wasm32"))]
+ fn fetch_star_system(
+     query: String,
+-    pending_data: Arc<std::sync::Mutex<Option<(String, Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>)>>>,
++    pending_data: Arc<
++        std::sync::Mutex<
++            Option<(
++                String,
++                Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>,
++            )>,
++        >,
++    >,
+     status: Arc<std::sync::Mutex<String>>,
+ ) {
+     if check_astronomy_osint_presets(&query, &pending_data, &status) {
+@@ -1926,13 +2213,13 @@ fn fetch_star_system(
+             query.replace(" ", "+"),
+             query.replace(" ", "+")
+         );
+-        
++
+         info!("Fetching hostname mapping from Caltech: {}", url1);
+         let output1 = std::process::Command::new("curl")
+             .arg("-s")
+             .arg(&url1)
+             .output();
+-            
++
+         let hostname = match output1 {
+             Ok(out) => {
+                 let text = String::from_utf8_lossy(&out.stdout);
+@@ -1952,26 +2239,26 @@ fn fetch_star_system(
+             }
+             Err(_) => None,
+         };
+-        
++
+         let found_host = hostname.unwrap_or(query);
+-        
++
+         {
+             if let Ok(mut st) = status.lock() {
+                 *st = format!("Fetching data for {}...", found_host);
+             }
+         }
+-        
++
+         let url2 = format!(
+             "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query=select+pl_name,pl_orbsmax,pl_orbeccen,pl_masse,pl_rade,st_mass,st_rad+from+pscomppars+where+hostname='{}'&format=json",
+             found_host.replace(" ", "+")
+         );
+-        
++
+         info!("Fetching planet data from Caltech: {}", url2);
+         let output2 = std::process::Command::new("curl")
+             .arg("-s")
+             .arg(&url2)
+             .output();
+-            
++
+         match output2 {
+             Ok(out) => {
+                 let text = String::from_utf8_lossy(&out.stdout);
+@@ -1983,7 +2270,7 @@ fn fetch_star_system(
+                             }
+                             return;
+                         }
+-                        
++
+                         let mut bodies = Vec::new();
+                         let mut st_mass_val = arr[0]["st_mass"].as_f64().unwrap_or(1.0);
+                         if st_mass_val <= 0.0 {
+@@ -1995,7 +2282,7 @@ fn fetch_star_system(
+                         }
+                         let m_sun = 1.989e30_f64;
+                         let star_mass = st_mass_val * m_sun;
+-                        
++
+                         let mut min_orbit = 999.0_f64;
+                         for pl in arr {
+                             let a = pl["pl_orbsmax"].as_f64().unwrap_or(1.0);
+@@ -2006,10 +2293,11 @@ fn fetch_star_system(
+                         if min_orbit > 500.0 {
+                             min_orbit = 1.0;
+                         }
+-                        
++
+                         let ideal_star_radius = st_rad_val as f32 * 0.163;
+-                        let star_radius = ideal_star_radius.clamp(0.005, (min_orbit as f32 * 0.35).max(0.005));
+-                        
++                        let star_radius =
++                            ideal_star_radius.clamp(0.005, (min_orbit as f32 * 0.35).max(0.005));
++
+                         bodies.push((
+                             found_host.clone(),
+                             Vector3::zeros(),
+@@ -2018,28 +2306,35 @@ fn fetch_star_system(
+                             star_radius,
+                             100u32,
+                         ));
+-                        
++
+                         let g = 6.67430e-11_f64;
+                         let au = 1.496e11_f64;
+                         let m_earth = 5.972e24_f64;
+-                        
++
+                         for pl in arr {
+-                            let name = pl["pl_name"].as_str().unwrap_or("Unknown Planet").to_string();
++                            let name = pl["pl_name"]
++                                .as_str()
++                                .unwrap_or("Unknown Planet")
++                                .to_string();
+                             let a = pl["pl_orbsmax"].as_f64().unwrap_or(1.0);
+                             let e = pl["pl_orbeccen"].as_f64().unwrap_or(0.0);
+                             let pl_mass_val = pl["pl_masse"].as_f64().unwrap_or(1.0);
+                             let planet_mass = pl_mass_val * m_earth;
+-                            
++
+                             let mut pl_rade_val = pl["pl_rade"].as_f64().unwrap_or(1.0);
+                             if pl_rade_val <= 0.0 {
+                                 pl_rade_val = 1.0;
+                             }
+-                            let planet_radius = (star_radius * pl_rade_val as f32 / (st_rad_val as f32 * 109.0)).max(0.0001);
+-                            
++                            let planet_radius = (star_radius * pl_rade_val as f32
++                                / (st_rad_val as f32 * 109.0))
++                                .max(0.0001);
++
+                             let a_m = a * au;
+                             let r_m = a_m * (1.0 - e);
+-                            let v_m = ((g * (star_mass + planet_mass) / a_m) * (1.0 + e) / (1.0 - e)).sqrt();
+-                            
++                            let v_m = ((g * (star_mass + planet_mass) / a_m) * (1.0 + e)
++                                / (1.0 - e))
++                                .sqrt();
++
+                             bodies.push((
+                                 name,
+                                 Vector3::new(r_m, 0.0, 0.0),
+@@ -2049,7 +2344,7 @@ fn fetch_star_system(
+                                 101u32,
+                             ));
+                         }
+-                        
++
+                         if let Ok(mut pending) = pending_data.lock() {
+                             *pending = Some((found_host.clone(), bodies));
+                         }
+@@ -2075,7 +2370,14 @@ fn fetch_star_system(
+ #[cfg(target_arch = "wasm32")]
+ fn fetch_star_system(
+     query: String,
+-    pending_data: Arc<std::sync::Mutex<Option<(String, Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>)>>>,
++    pending_data: Arc<
++        std::sync::Mutex<
++            Option<(
++                String,
++                Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>,
++            )>,
++        >,
++    >,
+     status: Arc<std::sync::Mutex<String>>,
+ ) {
+     if check_astronomy_osint_presets(&query, &pending_data, &status) {
+@@ -2256,7 +2558,8 @@ fn fetch_star_system(
+                 }
+ 
+                 let ideal_star_radius = st_rad_val as f32 * 0.163;
+-                let star_radius = ideal_star_radius.clamp(0.005, (min_orbit as f32 * 0.35).max(0.005));
++                let star_radius =
++                    ideal_star_radius.clamp(0.005, (min_orbit as f32 * 0.35).max(0.005));
+ 
+                 bodies.push((
+                     found_host.clone(),
+@@ -2272,7 +2575,10 @@ fn fetch_star_system(
+                 let m_earth = 5.972e24_f64;
+ 
+                 for pl in arr {
+-                    let name = pl["pl_name"].as_str().unwrap_or("Unknown Planet").to_string();
++                    let name = pl["pl_name"]
++                        .as_str()
++                        .unwrap_or("Unknown Planet")
++                        .to_string();
+                     let a = pl["pl_orbsmax"].as_f64().unwrap_or(1.0);
+                     let e = pl["pl_orbeccen"].as_f64().unwrap_or(0.0);
+                     let pl_mass_val = pl["pl_masse"].as_f64().unwrap_or(1.0);
+@@ -2282,11 +2588,14 @@ fn fetch_star_system(
+                     if pl_rade_val <= 0.0 {
+                         pl_rade_val = 1.0;
+                     }
+-                    let planet_radius = (star_radius * pl_rade_val as f32 / (st_rad_val as f32 * 109.0)).max(0.0001);
++                    let planet_radius = (star_radius * pl_rade_val as f32
++                        / (st_rad_val as f32 * 109.0))
++                        .max(0.0001);
+ 
+                     let a_m = a * au;
+                     let r_m = a_m * (1.0 - e);
+-                    let v_m = ((g * (star_mass + planet_mass) / a_m) * (1.0 + e) / (1.0 - e)).sqrt();
++                    let v_m =
++                        ((g * (star_mass + planet_mass) / a_m) * (1.0 + e) / (1.0 - e)).sqrt();
+ 
+                     bodies.push((
+                         name,
+@@ -2326,7 +2635,7 @@ fn map_winit_key_to_imgui(keycode: KeyCode) -> Option<imgui::Key> {
+         KeyCode::Delete => Some(imgui::Key::Delete),
+         KeyCode::Escape => Some(imgui::Key::Escape),
+         KeyCode::Tab => Some(imgui::Key::Tab),
+-        
++
+         KeyCode::KeyA => Some(imgui::Key::A),
+         KeyCode::KeyB => Some(imgui::Key::B),
+         KeyCode::KeyC => Some(imgui::Key::C),
+@@ -2353,7 +2662,7 @@ fn map_winit_key_to_imgui(keycode: KeyCode) -> Option<imgui::Key> {
+         KeyCode::KeyX => Some(imgui::Key::X),
+         KeyCode::KeyY => Some(imgui::Key::Y),
+         KeyCode::KeyZ => Some(imgui::Key::Z),
+-        
++
+         KeyCode::Digit0 => Some(imgui::Key::Alpha0),
+         KeyCode::Digit1 => Some(imgui::Key::Alpha1),
+         KeyCode::Digit2 => Some(imgui::Key::Alpha2),
+@@ -2391,11 +2700,18 @@ fn map_winit_key_to_imgui(keycode: KeyCode) -> Option<imgui::Key> {
+ 
+ fn check_astronomy_osint_presets(
+     query: &str,
+-    pending_data: &Arc<std::sync::Mutex<Option<(String, Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>)>>>,
++    pending_data: &Arc<
++        std::sync::Mutex<
++            Option<(
++                String,
++                Vec<(String, Vector3<f64>, Vector3<f64>, f64, f32, u32)>,
++            )>,
++        >,
++    >,
+     status: &Arc<std::sync::Mutex<String>>,
+ ) -> bool {
+     let query_lower = query.to_lowercase();
+-    
++
+     if query_lower.contains("sgr a") || query_lower.contains("sagittarius a*") {
+         let mut bodies = Vec::new();
+         bodies.push((
+@@ -2406,7 +2722,7 @@ fn check_astronomy_osint_presets(
+             0.8,
+             20u32, // Black Hole
+         ));
+-        
++
+         let g = 6.67430e-11_f64;
+         let au = 1.496e11_f64;
+         let a_m = 970.0 * au;
+@@ -2415,7 +2731,7 @@ fn check_astronomy_osint_presets(
+         let bh_mass = 4.15e6 * 1.989e30;
+         let r_m = a_m * (1.0 - e);
+         let v_m = ((g * (bh_mass + star_mass) / a_m) * (1.0 + e) / (1.0 - e)).sqrt();
+-        
++
+         bodies.push((
+             "S2 (Star)".to_string(),
+             Vector3::new(r_m, 0.0, 0.0),
+@@ -2424,7 +2740,7 @@ fn check_astronomy_osint_presets(
+             0.008,
+             101u32,
+         ));
+-        
++
+         if let Ok(mut pending) = pending_data.lock() {
+             *pending = Some(("Sagittarius A*".to_string(), bodies));
+         }
+@@ -2433,7 +2749,7 @@ fn check_astronomy_osint_presets(
+         }
+         return true;
+     }
+-    
++
+     if query_lower.contains("m87") || query_lower.contains("messier 87") {
+         let mut bodies = Vec::new();
+         bodies.push((
+@@ -2444,7 +2760,7 @@ fn check_astronomy_osint_presets(
+             1.2,
+             21u32, // Quasar
+         ));
+-        
++
+         if let Ok(mut pending) = pending_data.lock() {
+             *pending = Some(("M87* Quasar".to_string(), bodies));
+         }
+@@ -2453,7 +2769,7 @@ fn check_astronomy_osint_presets(
+         }
+         return true;
+     }
+-    
++
+     if query_lower.contains("halley") || query_lower.contains("1p/halley") {
+         let mut bodies = Vec::new();
+         bodies.push((
+@@ -2464,7 +2780,7 @@ fn check_astronomy_osint_presets(
+             0.163,
+             0u32,
+         ));
+-        
++
+         let g = 6.67430e-11_f64;
+         let au = 1.496e11_f64;
+         let a_m = 17.8 * au;
+@@ -2472,7 +2788,7 @@ fn check_astronomy_osint_presets(
+         let comet_mass = 2.2e14;
+         let r_m = a_m * (1.0 - e);
+         let v_m = ((g * 1.989e30 / a_m) * (1.0 + e) / (1.0 - e)).sqrt();
+-        
++
+         bodies.push((
+             "1P/Halley (Comet)".to_string(),
+             Vector3::new(r_m, 0.0, 0.0),
+@@ -2481,7 +2797,7 @@ fn check_astronomy_osint_presets(
+             0.005,
+             24u32, // Comet
+         ));
+-        
++
+         if let Ok(mut pending) = pending_data.lock() {
+             *pending = Some(("1P/Halley".to_string(), bodies));
+         }
+@@ -2490,7 +2806,7 @@ fn check_astronomy_osint_presets(
+         }
+         return true;
+     }
+-    
++
+     if query_lower.contains("oumuamua") || query_lower.contains("1i/oumuamua") {
+         let mut bodies = Vec::new();
+         bodies.push((
+@@ -2501,12 +2817,12 @@ fn check_astronomy_osint_presets(
+             0.163,
+             0u32,
+         ));
+-        
++
+         let g = 6.67430e-11_f64;
+         let au = 1.496e11_f64;
+         let a_m = 1.2 * au;
+         let v_m = ((g * 1.989e30 / a_m) * 2.0).sqrt() * 1.1;
+-        
++
+         bodies.push((
+             "1I/'Oumuamua (Interstellar)".to_string(),
+             Vector3::new(a_m, 0.0, 0.0),
+@@ -2515,7 +2831,7 @@ fn check_astronomy_osint_presets(
+             0.004,
+             16u32, // Elongated
+         ));
+-        
++
+         if let Ok(mut pending) = pending_data.lock() {
+             *pending = Some(("1I/'Oumuamua".to_string(), bodies));
+         }
+@@ -2524,7 +2840,7 @@ fn check_astronomy_osint_presets(
+         }
+         return true;
+     }
+-    
++
+     false
+ }
+ 
+@@ -2537,7 +2853,7 @@ fn send_to_aster_desktop(
+     std::thread::spawn(move || {
+         let url = "http://localhost:8080/api/chat";
+         let body = serde_json::json!({ "message": message }).to_string();
+-        
++
+         info!("Sending query to ASTER: {}", message);
+         let output = std::process::Command::new("curl")
+             .arg("-X")
+@@ -2551,7 +2867,7 @@ fn send_to_aster_desktop(
+             .arg("-s")
+             .arg(url)
+             .output();
+-            
++
+         match output {
+             Ok(out) => {
+                 let text = String::from_utf8_lossy(&out.stdout);
+@@ -2562,7 +2878,9 @@ fn send_to_aster_desktop(
+                         }
+                     } else {
+                         if let Ok(mut hist) = chat_history.lock() {
+-                            hist.push("ASTER: Error: Received invalid response format.".to_string());
++                            hist.push(
++                                "ASTER: Error: Received invalid response format.".to_string(),
++                            );
+                         }
+                     }
+                 } else {
+@@ -2592,21 +2910,21 @@ fn send_to_aster_wasm(
+     wasm_bindgen_futures::spawn_local(async move {
+         let url = "http://localhost:8080/api/chat";
+         let window = web_sys::window().unwrap();
+-        
++
+         let mut opts = web_sys::RequestInit::new();
+         opts.method("POST");
+         opts.mode(web_sys::RequestMode::Cors);
+-        
++
+         let body = serde_json::json!({ "message": message }).to_string();
+         opts.body(Some(&wasm_bindgen::JsValue::from_str(&body)));
+-        
++
+         let headers = web_sys::Headers::new().unwrap();
+         headers.append("Content-Type", "application/json").unwrap();
+         headers.append("X-Session-ID", &session_id).unwrap();
+         opts.headers(&headers);
+ 
+         let request = web_sys::Request::new_with_str_and_init(url, &opts).unwrap();
+-        
++
+         match JsFuture::from(window.fetch_with_request(&request)).await {
+             Ok(resp_val) => {
+                 let resp: web_sys::Response = resp_val.dyn_into().unwrap();
+@@ -2660,7 +2978,11 @@ mod tests {
+         let status = Arc::new(std::sync::Mutex::new("Idle".to_string()));
+ 
+         // Test Sgr A* black hole preset
+-        assert!(check_astronomy_osint_presets("Sagittarius A*", &pending, &status));
++        assert!(check_astronomy_osint_presets(
++            "Sagittarius A*",
++            &pending,
++            &status
++        ));
+         {
+             let lock = pending.lock().unwrap();
+             let (name, bodies) = lock.as_ref().unwrap();
+@@ -2690,7 +3012,11 @@ mod tests {
+         *pending.lock().unwrap() = None;
+ 
+         // Test Halley's comet preset
+-        assert!(check_astronomy_osint_presets("1P/Halley", &pending, &status));
++        assert!(check_astronomy_osint_presets(
++            "1P/Halley",
++            &pending,
++            &status
++        ));
+         {
+             let lock = pending.lock().unwrap();
+             let (name, bodies) = lock.as_ref().unwrap();
+@@ -2716,11 +3042,11 @@ mod tests {
+ 
+         // Test invalid query (should return false and not modify pending)
+         *pending.lock().unwrap() = None;
+-        assert!(!check_astronomy_osint_presets("Nonexistent Random Star", &pending, &status));
++        assert!(!check_astronomy_osint_presets(
++            "Nonexistent Random Star",
++            &pending,
++            &status
++        ));
+         assert!(pending.lock().unwrap().is_none());
+     }
+ }
+-
+-
+-
+-
+diff --git a/src/ephemeris.rs b/src/ephemeris.rs
+index 7e02890..edcab5c 100644
+--- a/src/ephemeris.rs
++++ b/src/ephemeris.rs
+@@ -1,10 +1,10 @@
+ #![cfg(not(target_arch = "wasm32"))]
+ 
+ use anise::prelude::*;
+-use hifitime::Epoch;
+-use nalgebra::Vector3;
+ use anyhow::{Result, anyhow};
++use hifitime::Epoch;
+ use log::{info, warn};
++use nalgebra::Vector3;
+ 
+ pub struct EphemerisEngine {
+     almanac: Almanac,
+@@ -20,9 +20,11 @@ impl EphemerisEngine {
+     /// Load a SPICE kernel file (BSP or PCK) into the Almanac context.
+     pub fn load_kernel(&mut self, path: &str) -> Result<()> {
+         info!("Loading SPICE kernel: {}", path);
+-        let new_almanac = self.almanac.clone().load(path).map_err(|e| {
+-            anyhow!("Failed to load kernel '{}': {:?}", path, e)
+-        })?;
++        let new_almanac = self
++            .almanac
++            .clone()
++            .load(path)
++            .map_err(|e| anyhow!("Failed to load kernel '{}': {:?}", path, e))?;
+         self.almanac = new_almanac;
+         Ok(())
+     }
+@@ -42,12 +44,18 @@ impl EphemerisEngine {
+                     loaded_any = true;
+                 }
+             } else {
+-                info!("Kernel file not found at: {} (will use default/computed states if not loaded)", path);
++                info!(
++                    "Kernel file not found at: {} (will use default/computed states if not loaded)",
++                    path
++                );
+             }
+         }
+ 
+         if !loaded_any {
+-            warn!("No standard planetary kernels loaded from '{}'. Coordinate translations may fail if frames are not defined.", data_dir);
++            warn!(
++                "No standard planetary kernels loaded from '{}'. Coordinate translations may fail if frames are not defined.",
++                data_dir
++            );
+         }
+         Ok(())
+     }
+@@ -55,34 +63,82 @@ impl EphemerisEngine {
+     /// Validate if a transformation path exists between two NAIF IDs.
+     /// Returns Ok(()) if the DAG has a valid path, or an error detailing the separation.
+     pub fn validate_transformation(&self, target_id: i32, observer_id: i32) -> Result<()> {
+-        let target_uid = FrameUid { ephemeris_id: target_id, orientation_id: 1 };
+-        let observer_uid = FrameUid { ephemeris_id: observer_id, orientation_id: 1 };
++        let target_uid = FrameUid {
++            ephemeris_id: target_id,
++            orientation_id: 1,
++        };
++        let observer_uid = FrameUid {
++            ephemeris_id: observer_id,
++            orientation_id: 1,
++        };
+ 
+-        let target_frame = self.almanac.frame_info(target_uid)
++        let target_frame = self
++            .almanac
++            .frame_info(target_uid)
+             .map_err(|e| anyhow!("Target frame (NAIF ID {}) not loaded: {:?}", target_id, e))?;
+-        let observer_frame = self.almanac.frame_info(observer_uid)
+-            .map_err(|e| anyhow!("Observer frame (NAIF ID {}) not loaded: {:?}", observer_id, e))?;
++        let observer_frame = self.almanac.frame_info(observer_uid).map_err(|e| {
++            anyhow!(
++                "Observer frame (NAIF ID {}) not loaded: {:?}",
++                observer_id,
++                e
++            )
++        })?;
+ 
+         // Perform a test translation at default epoch to check path connectivity
+         let test_epoch = Epoch::default();
+-        self.almanac.translate(target_frame, observer_frame, test_epoch, None)
+-            .map_err(|e| anyhow!("Disconnected frame graph between NAIF ID {} and {}: {:?}", target_id, observer_id, e))?;
++        self.almanac
++            .translate(target_frame, observer_frame, test_epoch, None)
++            .map_err(|e| {
++                anyhow!(
++                    "Disconnected frame graph between NAIF ID {} and {}: {:?}",
++                    target_id,
++                    observer_id,
++                    e
++                )
++            })?;
+ 
+         Ok(())
+     }
+ 
+     /// Query the position (in km) and velocity (in km/s) of a target body relative to an observer body.
+-    pub fn get_state(&self, target_id: i32, observer_id: i32, epoch: Epoch) -> Result<(Vector3<f64>, Vector3<f64>)> {
+-        let target_uid = FrameUid { ephemeris_id: target_id, orientation_id: 1 };
+-        let observer_uid = FrameUid { ephemeris_id: observer_id, orientation_id: 1 };
++    pub fn get_state(
++        &self,
++        target_id: i32,
++        observer_id: i32,
++        epoch: Epoch,
++    ) -> Result<(Vector3<f64>, Vector3<f64>)> {
++        let target_uid = FrameUid {
++            ephemeris_id: target_id,
++            orientation_id: 1,
++        };
++        let observer_uid = FrameUid {
++            ephemeris_id: observer_id,
++            orientation_id: 1,
++        };
+ 
+-        let target_frame = self.almanac.frame_info(target_uid)
++        let target_frame = self
++            .almanac
++            .frame_info(target_uid)
+             .map_err(|e| anyhow!("Target frame (NAIF ID {}) not loaded: {:?}", target_id, e))?;
+-        let observer_frame = self.almanac.frame_info(observer_uid)
+-            .map_err(|e| anyhow!("Observer frame (NAIF ID {}) not loaded: {:?}", observer_id, e))?;
++        let observer_frame = self.almanac.frame_info(observer_uid).map_err(|e| {
++            anyhow!(
++                "Observer frame (NAIF ID {}) not loaded: {:?}",
++                observer_id,
++                e
++            )
++        })?;
+ 
+-        let state = self.almanac.translate(target_frame, observer_frame, epoch, None)
+-            .map_err(|e| anyhow!("Failed translation from {} to {}: {:?}", observer_id, target_id, e))?;
++        let state = self
++            .almanac
++            .translate(target_frame, observer_frame, epoch, None)
++            .map_err(|e| {
++                anyhow!(
++                    "Failed translation from {} to {}: {:?}",
++                    observer_id,
++                    target_id,
++                    e
++                )
++            })?;
+ 
+         Ok((state.radius_km, state.velocity_km_s))
+     }
+diff --git a/src/lib.rs b/src/lib.rs
+index 9bfb278..24f6d16 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,8 +1,8 @@
+ pub mod app;
+-pub mod physics;
+-pub mod render;
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod ephemeris;
++pub mod physics;
++pub mod render;
+ 
+ #[cfg(target_arch = "wasm32")]
+ use wasm_bindgen::prelude::*;
+@@ -26,7 +26,7 @@ extern "C" {
+ }
+ 
+ #[cfg(target_arch = "wasm32")]
+-use std::alloc::{alloc, dealloc, realloc as rust_realloc, Layout};
++use std::alloc::{Layout, alloc, dealloc, realloc as rust_realloc};
+ 
+ const ALIGNMENT: usize = 16;
+ const HEADER_SIZE: usize = 16;
+@@ -85,7 +85,10 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
+         let old_layout = Layout::from_size_align_unchecked(old_size + HEADER_SIZE, ALIGNMENT);
+         let new_real_ptr = rust_realloc(real_ptr, old_layout, new_size + HEADER_SIZE);
+         if new_real_ptr.is_null() {
+-            log(&format!("realloc({:?}, {}) -> Reallocation Failed (null)", ptr, new_size));
++            log(&format!(
++                "realloc({:?}, {}) -> Reallocation Failed (null)",
++                ptr, new_size
++            ));
+             return std::ptr::null_mut();
+         }
+         *(new_real_ptr as *mut usize) = new_size;
+@@ -107,7 +110,12 @@ pub extern "C" fn __syscall_ioctl(_fd: i32, _req: i32, _arg: i32) -> i32 {
+ 
+ #[cfg(target_arch = "wasm32")]
+ #[unsafe(no_mangle)]
+-pub extern "C" fn __syscall_openat(_dirfd: i32, _pathname: *const u8, _flags: i32, _mode: i32) -> i32 {
++pub extern "C" fn __syscall_openat(
++    _dirfd: i32,
++    _pathname: *const u8,
++    _flags: i32,
++    _mode: i32,
++) -> i32 {
+     -1
+ }
+ 
+@@ -135,6 +143,40 @@ pub extern "C" fn fd_close(_fd: i32) -> i32 {
+     0
+ }
+ 
++#[cfg(target_arch = "wasm32")]
++pub(crate) static CUBESAT_STATE: std::sync::Mutex<Option<[f64; 6]>> = std::sync::Mutex::new(None);
++
++/// Called from cubesat_bridge.js with the live F´/CSPICE state in metres,
++/// Earth-centred ecliptic J2000.
++#[cfg(target_arch = "wasm32")]
++#[wasm_bindgen]
++pub fn set_cubesat_state(x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64) {
++    if let Ok(mut state) = CUBESAT_STATE.lock() {
++        *state = Some([x, y, z, vx, vy, vz]);
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++pub(crate) static CUBESAT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
++
++/// 0 = Earth (specific), 1 = Universe (big picture).
++#[cfg(target_arch = "wasm32")]
++#[wasm_bindgen]
++pub fn set_cubesat_mode(mode: u32) {
++    CUBESAT_MODE.store(mode.min(1) as u8, std::sync::atomic::Ordering::Relaxed);
++}
++
++#[cfg(target_arch = "wasm32")]
++pub(crate) fn take_cubesat_mode() -> Option<u8> {
++    let value = CUBESAT_MODE.swap(255, std::sync::atomic::Ordering::Relaxed);
++    if value == 255 { None } else { Some(value) }
++}
++
++#[cfg(target_arch = "wasm32")]
++pub(crate) fn cubesat_state() -> Option<[f64; 6]> {
++    CUBESAT_STATE.lock().ok().and_then(|state| *state)
++}
++
+ #[cfg(target_arch = "wasm32")]
+ #[wasm_bindgen]
+ pub async fn start_simulation() -> Result<(), String> {
+diff --git a/src/physics/cuda.rs b/src/physics/cuda.rs
+index bee54ac..2da0345 100644
+--- a/src/physics/cuda.rs
++++ b/src/physics/cuda.rs
+@@ -1,11 +1,11 @@
+ #![cfg(not(target_arch = "wasm32"))]
+ 
+ use crate::physics::PhysicsEngine;
+-use nalgebra::Vector3;
+ use anyhow::{Result, anyhow};
+-use std::sync::Arc;
+-use cudarc::driver::{CudaDevice, LaunchConfig, LaunchAsync};
++use cudarc::driver::{CudaDevice, LaunchAsync, LaunchConfig};
+ use log::info;
++use nalgebra::Vector3;
++use std::sync::Arc;
+ 
+ pub struct CudaPhysicsEngine {
+     device: Arc<CudaDevice>,
+@@ -27,15 +27,16 @@ impl CudaPhysicsEngine {
+         info!("Attempting to initialize CUDA device 0...");
+         let device = CudaDevice::new(0)
+             .map_err(|e| anyhow!("Failed to initialize CUDA device 0: {:?}", e))?;
+-            
++
+         info!("Compiling EIH CUDA kernel at runtime via NVRTC...");
+         let cuda_src = include_str!("../../kernels/eih.cu");
+         let ptx = cudarc::nvrtc::compile_ptx(cuda_src)
+             .map_err(|e| anyhow!("Failed to compile EIH kernel: {:?}", e))?;
+-            
+-        device.load_ptx(ptx, "eih_module", &["integrate_eih"])
++
++        device
++            .load_ptx(ptx, "eih_module", &["integrate_eih"])
+             .map_err(|e| anyhow!("Failed to load EIH module into device: {:?}", e))?;
+-            
++
+         info!("CUDA physics solver successfully initialized.");
+         Ok(Self {
+             device,
+@@ -52,7 +53,7 @@ impl PhysicsEngine for CudaPhysicsEngine {
+         if n == 0 {
+             return;
+         }
+-        
++
+         // Flatten vectors for GPU transfer
+         let mut flat_positions = Vec::with_capacity(3 * n);
+         let mut flat_velocities = Vec::with_capacity(3 * n);
+@@ -60,19 +61,31 @@ impl PhysicsEngine for CudaPhysicsEngine {
+             flat_positions.push(self.positions[i].x);
+             flat_positions.push(self.positions[i].y);
+             flat_positions.push(self.positions[i].z);
+-            
++
+             flat_velocities.push(self.velocities[i].x);
+             flat_velocities.push(self.velocities[i].y);
+             flat_velocities.push(self.velocities[i].z);
+         }
+-        
++
+         // Copy data to GPU
+-        let mut pos_dev = self.device.htod_copy(flat_positions).expect("CUDA htod copy pos failed");
+-        let mut vel_dev = self.device.htod_copy(flat_velocities).expect("CUDA htod copy vel failed");
+-        let mass_dev = self.device.htod_copy(self.masses.clone()).expect("CUDA htod copy mass failed");
+-        
+-        let func = self.device.get_func("eih_module", "integrate_eih").expect("CUDA EIH function not found");
+-        
++        let mut pos_dev = self
++            .device
++            .htod_copy(flat_positions)
++            .expect("CUDA htod copy pos failed");
++        let mut vel_dev = self
++            .device
++            .htod_copy(flat_velocities)
++            .expect("CUDA htod copy vel failed");
++        let mass_dev = self
++            .device
++            .htod_copy(self.masses.clone())
++            .expect("CUDA htod copy mass failed");
++
++        let func = self
++            .device
++            .get_func("eih_module", "integrate_eih")
++            .expect("CUDA EIH function not found");
++
+         // Configure block and grid dimensions
+         let threads_per_block = 256;
+         let blocks = ((n + threads_per_block - 1) / threads_per_block) as u32;
+@@ -81,21 +94,35 @@ impl PhysicsEngine for CudaPhysicsEngine {
+             block_dim: (threads_per_block as u32, 1, 1),
+             shared_mem_bytes: 0,
+         };
+-        
++
+         // Launch kernel
+         unsafe {
+             func.launch(cfg, (&mut pos_dev, &mut vel_dev, &mass_dev, dt, n as i32))
+                 .expect("Failed to launch CUDA EIH kernel");
+         }
+-        
++
+         // Sync copy data back from GPU
+-        let updated_positions = self.device.dtoh_sync_copy(&pos_dev).expect("CUDA dtoh copy pos failed");
+-        let updated_velocities = self.device.dtoh_sync_copy(&vel_dev).expect("CUDA dtoh copy vel failed");
+-        
++        let updated_positions = self
++            .device
++            .dtoh_sync_copy(&pos_dev)
++            .expect("CUDA dtoh copy pos failed");
++        let updated_velocities = self
++            .device
++            .dtoh_sync_copy(&vel_dev)
++            .expect("CUDA dtoh copy vel failed");
++
+         // Unflatten vectors back into host storage
+         for i in 0..n {
+-            self.positions[i] = Vector3::new(updated_positions[3*i], updated_positions[3*i+1], updated_positions[3*i+2]);
+-            self.velocities[i] = Vector3::new(updated_velocities[3*i], updated_velocities[3*i+1], updated_velocities[3*i+2]);
++            self.positions[i] = Vector3::new(
++                updated_positions[3 * i],
++                updated_positions[3 * i + 1],
++                updated_positions[3 * i + 2],
++            );
++            self.velocities[i] = Vector3::new(
++                updated_velocities[3 * i],
++                updated_velocities[3 * i + 1],
++                updated_velocities[3 * i + 2],
++            );
+         }
+     }
+ 
+@@ -117,7 +144,13 @@ impl PhysicsEngine for CudaPhysicsEngine {
+         self.masses.push(mass);
+     }
+ 
+-    fn set_body(&mut self, index: usize, position: Vector3<f64>, velocity: Vector3<f64>, mass: f64) {
++    fn set_body(
++        &mut self,
++        index: usize,
++        position: Vector3<f64>,
++        velocity: Vector3<f64>,
++        mass: f64,
++    ) {
+         if index < self.positions.len() {
+             self.positions[index] = position;
+             self.velocities[index] = velocity;
+diff --git a/src/physics/kepler.rs b/src/physics/kepler.rs
+index f733cfb..dadd10d 100644
+--- a/src/physics/kepler.rs
++++ b/src/physics/kepler.rs
+@@ -2,27 +2,37 @@ use nalgebra::Vector3;
+ 
+ #[derive(Clone, Copy, serde::Deserialize)]
+ pub struct KeplerElements {
+-    pub a0: f64, pub a_dot: f64,
+-    pub e0: f64, pub e_dot: f64,
+-    pub i0: f64, pub i_dot: f64,
+-    pub L0: f64, pub L_dot: f64,
+-    pub varpi0: f64, pub varpi_dot: f64,
+-    pub omega0: f64, pub omega_dot: f64,
++    pub a0: f64,
++    pub a_dot: f64,
++    pub e0: f64,
++    pub e_dot: f64,
++    pub i0: f64,
++    pub i_dot: f64,
++    pub L0: f64,
++    pub L_dot: f64,
++    pub varpi0: f64,
++    pub varpi_dot: f64,
++    pub omega0: f64,
++    pub omega_dot: f64,
+ }
+ 
+-pub fn get_orbit_state(elements: &KeplerElements, jd: f64, parent_mass: f64) -> (Vector3<f64>, Vector3<f64>) {
++pub fn get_orbit_state(
++    elements: &KeplerElements,
++    jd: f64,
++    parent_mass: f64,
++) -> (Vector3<f64>, Vector3<f64>) {
+     let t = (jd - 2451545.0) / 36525.0; // Julian centuries since J2000.0
+-    
++
+     let a = elements.a0 + elements.a_dot * t;
+     let e = elements.e0 + elements.e_dot * t;
+     let i = (elements.i0 + elements.i_dot * t).to_radians();
+     let l = (elements.L0 + elements.L_dot * t).to_radians();
+     let varpi = (elements.varpi0 + elements.varpi_dot * t).to_radians();
+     let omega = (elements.omega0 + elements.omega_dot * t).to_radians();
+-    
++
+     let arg_peri = varpi - omega;
+     let m = l - varpi;
+-    
++
+     // Normalize mean anomaly to [-PI, PI]
+     let mut m = m % (2.0 * std::f64::consts::PI);
+     if m < -std::f64::consts::PI {
+@@ -30,20 +40,22 @@ pub fn get_orbit_state(elements: &KeplerElements, jd: f64, parent_mass: f64) ->
+     } else if m > std::f64::consts::PI {
+         m -= 2.0 * std::f64::consts::PI;
+     }
+-    
++
+     // Solve Kepler's equation
+     let mut eccentric_anomaly = m;
+     for _ in 0..5 {
+-        eccentric_anomaly = eccentric_anomaly - (eccentric_anomaly - e * eccentric_anomaly.sin() - m) / (1.0 - e * eccentric_anomaly.cos());
++        eccentric_anomaly = eccentric_anomaly
++            - (eccentric_anomaly - e * eccentric_anomaly.sin() - m)
++                / (1.0 - e * eccentric_anomaly.cos());
+     }
+-    
++
+     // Coordinates in the orbital plane
+     let au = 1.495978707e11; // meters
+     let a_m = a * au;
+-    
++
+     let x_plane = a_m * (eccentric_anomaly.cos() - e);
+     let y_plane = a_m * (1.0 - e * e).sqrt() * eccentric_anomaly.sin();
+-    
++
+     // Rotation matrix elements
+     let cos_w = arg_peri.cos();
+     let sin_w = arg_peri.sin();
+@@ -51,34 +63,34 @@ pub fn get_orbit_state(elements: &KeplerElements, jd: f64, parent_mass: f64) ->
+     let sin_lan = omega.sin();
+     let cos_i = i.cos();
+     let sin_i = i.sin();
+-    
++
+     let r11 = cos_w * cos_lan - sin_w * sin_lan * cos_i;
+     let r12 = -sin_w * cos_lan - cos_w * sin_lan * cos_i;
+     let r21 = cos_w * sin_lan + sin_w * cos_lan * cos_i;
+     let r22 = -sin_w * sin_lan + cos_w * cos_lan * cos_i;
+     let r31 = sin_w * sin_i;
+     let r32 = cos_w * sin_i;
+-    
++
+     let pos = Vector3::new(
+         x_plane * r11 + y_plane * r12,
+         x_plane * r31 + y_plane * r32,
+         x_plane * r21 + y_plane * r22,
+     );
+-    
++
+     // Velocities
+     let g = 6.67430e-11;
+     let n = (g * parent_mass / (a_m * a_m * a_m)).sqrt();
+     let r = a_m * (1.0 - e * eccentric_anomaly.cos());
+-    
++
+     let vx_plane = (-a_m * a_m * n * eccentric_anomaly.sin()) / r;
+     let vy_plane = (a_m * a_m * n * (1.0 - e * e).sqrt() * eccentric_anomaly.cos()) / r;
+-    
++
+     let vel = Vector3::new(
+         vx_plane * r11 + vy_plane * r12,
+         vx_plane * r31 + vy_plane * r32,
+         vx_plane * r21 + vy_plane * r22,
+     );
+-    
++
+     (pos, vel)
+ }
+ 
+@@ -86,28 +98,36 @@ pub fn jd_to_calendar(jd: f64) -> (i32, i32, i32, i32, i32) {
+     let jd = jd + 0.5;
+     let z = jd.floor() as i64;
+     let f = jd - jd.floor();
+-    
++
+     let a = if z < 2299161 {
+         z
+     } else {
+         let alpha = (((z as f64 - 1867216.25) / 36524.25).floor()) as i64;
+         z + 1 + alpha - (alpha / 4)
+     };
+-    
++
+     let b = a + 1524;
+     let c = (((b as f64 - 122.1) / 365.25).floor()) as i64;
+     let d = (365.25 * c as f64).floor() as i64;
+     let e = (((b - d) as f64 / 30.6001).floor()) as i64;
+-    
++
+     let day = (b - d - (30.6001 * e as f64).floor() as i64) as i32;
+-    let month = if e < 14 { (e - 1) as i32 } else { (e - 13) as i32 };
+-    let year = if month > 2 { (c - 4716) as i32 } else { (c - 4715) as i32 };
+-    
++    let month = if e < 14 {
++        (e - 1) as i32
++    } else {
++        (e - 13) as i32
++    };
++    let year = if month > 2 {
++        (c - 4716) as i32
++    } else {
++        (c - 4715) as i32
++    };
++
+     let time_day = f * 24.0;
+     let hour = time_day.floor() as i32;
+     let time_hour = (time_day - hour as f64) * 60.0;
+     let minute = time_hour.floor() as i32;
+-    
++
+     (year, month, day, hour, minute)
+ }
+ 
+@@ -135,54 +155,62 @@ pub fn get_keplerian_body_state(
+ ) -> (Vector3<f64>, Vector3<f64>) {
+     let dt_sec = (jd - body.epoch_jd) * 86400.0;
+     let mut m = body.mean_anomaly_epoch + (2.0 * std::f64::consts::PI / body.period) * dt_sec;
+-    
++
+     m = m % (2.0 * std::f64::consts::PI);
+     if m < -std::f64::consts::PI {
+         m += 2.0 * std::f64::consts::PI;
+     } else if m > std::f64::consts::PI {
+         m -= 2.0 * std::f64::consts::PI;
+     }
+-    
++
+     let mut eccentric_anomaly = m;
+     for _ in 0..5 {
+-        eccentric_anomaly = eccentric_anomaly - (eccentric_anomaly - body.eccentricity * eccentric_anomaly.sin() - m) / (1.0 - body.eccentricity * eccentric_anomaly.cos());
++        eccentric_anomaly = eccentric_anomaly
++            - (eccentric_anomaly - body.eccentricity * eccentric_anomaly.sin() - m)
++                / (1.0 - body.eccentricity * eccentric_anomaly.cos());
+     }
+-    
++
+     let x_plane = body.semi_major_axis * (eccentric_anomaly.cos() - body.eccentricity);
+-    let y_plane = body.semi_major_axis * (1.0 - body.eccentricity * body.eccentricity).sqrt() * eccentric_anomaly.sin();
+-    
++    let y_plane = body.semi_major_axis
++        * (1.0 - body.eccentricity * body.eccentricity).sqrt()
++        * eccentric_anomaly.sin();
++
+     let cos_w = body.argument_periapsis.cos();
+     let sin_w = body.argument_periapsis.sin();
+     let cos_lan = body.longitude_ascending_node.cos();
+     let sin_lan = body.longitude_ascending_node.sin();
+     let cos_i = body.inclination.cos();
+     let sin_i = body.inclination.sin();
+-    
++
+     let r11 = cos_w * cos_lan - sin_w * sin_lan * cos_i;
+     let r12 = -sin_w * cos_lan - cos_w * sin_lan * cos_i;
+     let r21 = cos_w * sin_lan + sin_w * cos_lan * cos_i;
+     let r22 = -sin_w * sin_lan + cos_w * cos_lan * cos_i;
+     let r31 = sin_w * sin_i;
+     let r32 = cos_w * sin_i;
+-    
++
+     let rel_pos = Vector3::new(
+         x_plane * r11 + y_plane * r12,
+         x_plane * r31 + y_plane * r32,
+         x_plane * r21 + y_plane * r22,
+     );
+-    
++
+     let n = 2.0 * std::f64::consts::PI / body.period;
+     let r = body.semi_major_axis * (1.0 - body.eccentricity * eccentric_anomaly.cos());
+-    
++
+     let vx_plane = (-body.semi_major_axis * body.semi_major_axis * n * eccentric_anomaly.sin()) / r;
+-    let vy_plane = (body.semi_major_axis * body.semi_major_axis * n * (1.0 - body.eccentricity * body.eccentricity).sqrt() * eccentric_anomaly.cos()) / r;
+-    
++    let vy_plane = (body.semi_major_axis
++        * body.semi_major_axis
++        * n
++        * (1.0 - body.eccentricity * body.eccentricity).sqrt()
++        * eccentric_anomaly.cos())
++        / r;
++
+     let rel_vel = Vector3::new(
+         vx_plane * r11 + vy_plane * r12,
+         vx_plane * r31 + vy_plane * r32,
+         vx_plane * r21 + vy_plane * r22,
+     );
+-    
++
+     (parent_pos + rel_pos, parent_vel + rel_vel)
+ }
+-
+diff --git a/src/physics/mod.rs b/src/physics/mod.rs
+index fad9c3b..f13cee8 100644
+--- a/src/physics/mod.rs
++++ b/src/physics/mod.rs
+@@ -12,5 +12,5 @@ pub trait PhysicsEngine {
+ 
+ #[cfg(not(target_arch = "wasm32"))]
+ pub mod cuda;
+-pub mod vulkan_compute;
+ pub mod kepler;
++pub mod vulkan_compute;
+diff --git a/src/physics/vulkan_compute.rs b/src/physics/vulkan_compute.rs
+index ebd5ad0..be9e50c 100644
+--- a/src/physics/vulkan_compute.rs
++++ b/src/physics/vulkan_compute.rs
+@@ -17,7 +17,11 @@ impl VulkanComputePhysicsEngine {
+     }
+ 
+     /// Compute the EIH acceleration for each body given their positions and velocities.
+-    fn compute_eih_accelerations(&self, pos: &[Vector3<f64>], vel: &[Vector3<f64>]) -> Vec<Vector3<f64>> {
++    fn compute_eih_accelerations(
++        &self,
++        pos: &[Vector3<f64>],
++        vel: &[Vector3<f64>],
++    ) -> Vec<Vector3<f64>> {
+         let n = pos.len();
+         let mut acc = vec![Vector3::zeros(); n];
+         let mut newtonian_acc = vec![Vector3::zeros(); n];
+@@ -62,7 +66,7 @@ impl VulkanComputePhysicsEngine {
+                 }
+ 
+                 let n_ba = r_vec / r; // unit vector pointing from i to j
+-                let n_ab = -n_ba;     // unit vector pointing from j to i
++                let n_ab = -n_ba; // unit vector pointing from j to i
+ 
+                 let v_j = vel[j];
+                 let v_j_sq = v_j.norm_squared();
+@@ -97,8 +101,7 @@ impl VulkanComputePhysicsEngine {
+                 let dot_nab_vj = n_ab.dot(&v_j);
+                 let dot_r_aj = r_vec.dot(&a_j_approx);
+ 
+-                let bracket = v_i_sq
+-                    + 2.0 * v_j_sq
++                let bracket = v_i_sq + 2.0 * v_j_sq
+                     - 4.0 * dot_vi_vj
+                     - 1.5 * dot_nab_vj * dot_nab_vj
+                     - 4.0 * sum_pot_i
+@@ -174,8 +177,10 @@ impl PhysicsEngine for VulkanComputePhysicsEngine {
+ 
+         // Update positions and velocities
+         for i in 0..n {
+-            self.positions[i] += (dt / 6.0) * (pos_k1[i] + 2.0 * pos_k2[i] + 2.0 * pos_k3[i] + pos_k4[i]);
+-            self.velocities[i] += (dt / 6.0) * (acc_k1[i] + 2.0 * acc_k2[i] + 2.0 * acc_k3[i] + acc_k4[i]);
++            self.positions[i] +=
++                (dt / 6.0) * (pos_k1[i] + 2.0 * pos_k2[i] + 2.0 * pos_k3[i] + pos_k4[i]);
++            self.velocities[i] +=
++                (dt / 6.0) * (acc_k1[i] + 2.0 * acc_k2[i] + 2.0 * acc_k3[i] + acc_k4[i]);
+         }
+     }
+ 
+@@ -197,7 +202,13 @@ impl PhysicsEngine for VulkanComputePhysicsEngine {
+         self.masses.push(mass);
+     }
+ 
+-    fn set_body(&mut self, index: usize, position: Vector3<f64>, velocity: Vector3<f64>, mass: f64) {
++    fn set_body(
++        &mut self,
++        index: usize,
++        position: Vector3<f64>,
++        velocity: Vector3<f64>,
++        mass: f64,
++    ) {
+         if index < self.positions.len() {
+             self.positions[index] = position;
+             self.velocities[index] = velocity;
+@@ -238,6 +249,11 @@ mod tests {
+         let pos = engine.get_positions();
+         assert!(pos[0].norm() < 1e7, "Central body drifted too much");
+         let dist = (pos[1] - pos[0]).norm();
+-        assert!((dist - r).abs() / r < 1e-3, "Orbital radius not conserved: got {} vs expected {}", dist, r);
++        assert!(
++            (dist - r).abs() / r < 1e-3,
++            "Orbital radius not conserved: got {} vs expected {}",
++            dist,
++            r
++        );
+     }
+ }
+diff --git a/src/render/imgui_renderer.rs b/src/render/imgui_renderer.rs
+index 6041106..a94f612 100644
+--- a/src/render/imgui_renderer.rs
++++ b/src/render/imgui_renderer.rs
+@@ -1,6 +1,6 @@
+ use imgui::{Context, DrawData, DrawVert, TextureId};
+-use wgpu::util::{BufferInitDescriptor, DeviceExt};
+ use std::collections::HashMap;
++use wgpu::util::{BufferInitDescriptor, DeviceExt};
+ 
+ #[repr(transparent)]
+ #[derive(Debug, Copy, Clone)]
+@@ -121,27 +121,28 @@ impl CustomImguiRenderer {
+             }],
+         });
+ 
+-        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+-            label: Some("imgui texture bind group layout"),
+-            entries: &[
+-                wgpu::BindGroupLayoutEntry {
+-                    binding: 0,
+-                    visibility: wgpu::ShaderStages::FRAGMENT,
+-                    ty: wgpu::BindingType::Texture {
+-                        multisampled: false,
+-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+-                        view_dimension: wgpu::TextureViewDimension::D2,
++        let texture_bind_group_layout =
++            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
++                label: Some("imgui texture bind group layout"),
++                entries: &[
++                    wgpu::BindGroupLayoutEntry {
++                        binding: 0,
++                        visibility: wgpu::ShaderStages::FRAGMENT,
++                        ty: wgpu::BindingType::Texture {
++                            multisampled: false,
++                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
++                            view_dimension: wgpu::TextureViewDimension::D2,
++                        },
++                        count: None,
+                     },
+-                    count: None,
+-                },
+-                wgpu::BindGroupLayoutEntry {
+-                    binding: 1,
+-                    visibility: wgpu::ShaderStages::FRAGMENT,
+-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+-                    count: None,
+-                },
+-            ],
+-        });
++                    wgpu::BindGroupLayoutEntry {
++                        binding: 1,
++                        visibility: wgpu::ShaderStages::FRAGMENT,
++                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
++                        count: None,
++                    },
++                ],
++            });
+ 
+         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+             label: Some("imgui pipeline layout"),
+@@ -420,7 +421,10 @@ impl CustomImguiRenderer {
+         rpass.set_pipeline(&self.pipeline);
+         rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
+         rpass.set_vertex_buffer(0, self.vertex_buffer.as_ref().unwrap().slice(..));
+-        rpass.set_index_buffer(self.index_buffer.as_ref().unwrap().slice(..), wgpu::IndexFormat::Uint32);
++        rpass.set_index_buffer(
++            self.index_buffer.as_ref().unwrap().slice(..),
++            wgpu::IndexFormat::Uint32,
++        );
+ 
+         for batch in batches {
+             if batch.clip_rect[0] < fb_size[0]
+@@ -446,7 +450,10 @@ impl CustomImguiRenderer {
+                         rpass.set_bind_group(1, tex_bind_group, &[]);
+                         rpass.draw_indexed(batch.index_start..batch.index_end, 0, 0..1);
+                     } else {
+-                        anyhow::bail!("imgui render error: bad texture id '{}'", batch.texture_id.id());
++                        anyhow::bail!(
++                            "imgui render error: bad texture id '{}'",
++                            batch.texture_id.id()
++                        );
+                     }
+                 }
+             }
+diff --git a/src/render/mod.rs b/src/render/mod.rs
+index 5cd6352..2bb6d51 100644
+--- a/src/render/mod.rs
++++ b/src/render/mod.rs
+@@ -1,3 +1,3 @@
+-pub mod renderer;
+ pub mod imgui_renderer;
++pub mod renderer;
+ pub use renderer::Renderer;
+diff --git a/src/render/renderer.rs b/src/render/renderer.rs
+index 5314c4b..e5c2338 100644
+--- a/src/render/renderer.rs
++++ b/src/render/renderer.rs
+@@ -1,7 +1,7 @@
+ use anyhow::{Result, anyhow};
+-use std::sync::Arc;
+ use log::info;
+ use nalgebra::Vector3;
++use std::sync::Arc;
+ 
+ #[repr(C)]
+ #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+@@ -607,6 +607,14 @@ fn fs_sphere(in: SphereOutput) -> @location(0) vec4<f32> {
+     } else if (b_type == 11u) {
+         let n = fbm(N * 20.0);
+         albedo = vec3<f32>(0.4 + 0.15 * n, 0.38 + 0.12 * n, 0.36 + 0.1 * n);
++    } else if (b_type == 30u) {
++        let n = abs(N);
++        if (n.x > 0.55 || n.y > 0.55) {
++            albedo = vec3<f32>(0.06, 0.14, 0.42);  // OpenSCAD solar wings / cells
++            glow = 0.12;
++        } else {
++            albedo = vec3<f32>(0.82, 0.84, 0.90);  // rails, plates, antenna
++        }
+     } else if (b_type == 12u || b_type == 13u || b_type == 14u) {
+         if (in.uv.x > 0.05) {
+             // Solar panel wings: deep blue with solar grid cells
+@@ -708,8 +716,8 @@ fn fs_sphere(in: SphereOutput) -> @location(0) vec4<f32> {
+     if (in.is_selected == 1u) {
+         let V = normalize(in.view_dir);
+         let rim = 1.0 - max(dot(N, V), 0.0);
+-        let rim_glow = pow(rim, 28.0) * 1.5; // Very sharp selection ring
+-        color = color + vec3<f32>(0.0, 0.8, 1.0) * rim_glow;
++        let rim_glow = pow(rim, 28.0) * 0.35; // softer selection ring
++        color = color + vec3<f32>(0.35, 0.75, 1.0) * rim_glow;
+     }
+     return vec4<f32>(color, alpha);
+ }
+@@ -720,53 +728,57 @@ pub struct Renderer {
+     queue: Arc<wgpu::Queue>,
+     surface: wgpu::Surface<'static>,
+     surface_config: wgpu::SurfaceConfiguration,
+-    
++
+     // Rendering pipelines
+     skybox_pipeline: wgpu::RenderPipeline,
+     grid_pipeline: wgpu::RenderPipeline,
+     orbit_pipeline: wgpu::RenderPipeline,
+     sphere_pipeline: wgpu::RenderPipeline,
+-    
++
+     // Static meshes
+     grid_vertex_buffer: wgpu::Buffer,
+     grid_vertex_count: u32,
+-    
++
+     sphere_vertex_buffer: wgpu::Buffer,
+     sphere_index_buffer: wgpu::Buffer,
+     sphere_index_count: u32,
+-    
++
+     iss_vertex_buffer: wgpu::Buffer,
+     iss_index_buffer: wgpu::Buffer,
+     iss_index_count: u32,
+-    
++
+     starlink_vertex_buffer: wgpu::Buffer,
+     starlink_index_buffer: wgpu::Buffer,
+     starlink_index_count: u32,
+-    
++
+     gps_vertex_buffer: wgpu::Buffer,
+     gps_index_buffer: wgpu::Buffer,
+     gps_index_count: u32,
+-    
++
++    cubesat_vertex_buffer: wgpu::Buffer,
++    cubesat_index_buffer: wgpu::Buffer,
++    cubesat_index_count: u32,
++
+     ring_vertex_buffer: wgpu::Buffer,
+     ring_index_buffer: wgpu::Buffer,
+     ring_index_count: u32,
+-    
++
+     // Dynamic trail/orbit buffer
+     orbit_vertex_buffer: wgpu::Buffer,
+     orbit_vertex_capacity: usize,
+-    
++
+     // Uniform buffers
+     ubo_buffer: wgpu::Buffer,
+     push_buffer: wgpu::Buffer,
+-    
++
+     // Bind group & layout
+     bind_group_layout: wgpu::BindGroupLayout,
+     bind_group: wgpu::BindGroup,
+-    
++
+     // Depth stencil view
+     depth_texture: wgpu::Texture,
+     depth_view: wgpu::TextureView,
+-    
++
+     // ImGui renderer
+     pub imgui_renderer: super::imgui_renderer::CustomImguiRenderer,
+ }
+@@ -780,7 +792,7 @@ impl Renderer {
+         imgui_context: &mut imgui::Context,
+     ) -> Result<Self> {
+         info!("Initializing cross-platform wgpu Renderer...");
+-        
++
+         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+             label: Some("Simulation Shaders"),
+             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SHADER_SRC)),
+@@ -1061,6 +1073,19 @@ impl Renderer {
+         });
+         let gps_index_count = gps_indices.len() as u32;
+ 
++        let (cubesat_verts, cubesat_indices) = generate_cubesat();
++        let cubesat_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
++            label: Some("CubeSat Vertex Buffer"),
++            contents: bytemuck::cast_slice(&cubesat_verts),
++            usage: wgpu::BufferUsages::VERTEX,
++        });
++        let cubesat_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
++            label: Some("CubeSat Index Buffer"),
++            contents: bytemuck::cast_slice(&cubesat_indices),
++            usage: wgpu::BufferUsages::INDEX,
++        });
++        let cubesat_index_count = cubesat_indices.len() as u32;
++
+         let (ring_verts, ring_indices) = generate_ring(1.4, 2.3, 32);
+         let ring_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+             label: Some("Saturn Ring Vertex Buffer"),
+@@ -1170,6 +1195,10 @@ impl Renderer {
+             gps_vertex_buffer,
+             gps_index_buffer,
+             gps_index_count,
++
++            cubesat_vertex_buffer,
++            cubesat_index_buffer,
++            cubesat_index_count,
+             ring_vertex_buffer,
+             ring_index_buffer,
+             ring_index_count,
+@@ -1190,7 +1219,7 @@ impl Renderer {
+             self.surface_config.width = width;
+             self.surface_config.height = height;
+             self.surface.configure(&self.device, &self.surface_config);
+-            
++
+             // Recreate Depth Stencil texture
+             self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                 label: Some("Depth Texture"),
+@@ -1206,7 +1235,9 @@ impl Renderer {
+                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                 view_formats: &[],
+             });
+-            self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
++            self.depth_view = self
++                .depth_texture
++                .create_view(&wgpu::TextureViewDescriptor::default());
+         }
+     }
+ 
+@@ -1231,10 +1262,14 @@ impl Renderer {
+             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+             _ => return Err(anyhow!("Failed to acquire next surface texture")),
+         };
+-        let view_target = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+-            label: Some("Render Encoder"),
+-        });
++        let view_target = frame
++            .texture
++            .create_view(&wgpu::TextureViewDescriptor::default());
++        let mut encoder = self
++            .device
++            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
++                label: Some("Render Encoder"),
++            });
+ 
+         // 1. Update Global Uniform Buffer Object
+         let mut bodies = [BodyUbo { pos_mass: [0.0; 4] }; 10];
+@@ -1254,12 +1289,13 @@ impl Renderer {
+             star_radius: body_radii.first().copied().unwrap_or(0.163),
+             _padding: 0.0,
+         };
+-        self.queue.write_buffer(&self.ubo_buffer, 0, bytemuck::bytes_of(&ubo));
++        self.queue
++            .write_buffer(&self.ubo_buffer, 0, bytemuck::bytes_of(&ubo));
+ 
+         // 2. Prepare dynamic push constants buffer
+         // We write slots for grid, orbits, and planets
+         let mut push_slots = Vec::new();
+-        
++
+         // Slot 0: Grid (Identity matrix)
+         let identity = nalgebra::Matrix4::identity().into();
+         push_slots.push(PushConstants {
+@@ -1289,33 +1325,43 @@ impl Renderer {
+         for i in 0..num_spheres {
+             let p = bodies_pos_mass[i].pos_mass;
+             let radius = body_radii.get(i).copied().unwrap_or(0.001);
+-            
++
+             let dx = p[0] - camera_pos[0];
+             let dy = p[1] - camera_pos[1];
+             let dz = p[2] - camera_pos[2];
+-            let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+-            
++            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
++
+             let b_type = body_types.get(i).copied().unwrap_or(101);
+-            let min_size_factor = if b_type == 0 || b_type == 100 { 
+-                0.006 
+-            } else if b_type >= 12 && b_type <= 14 { // ISS, Starlink, GPS
+-                0.0005 
+-            } else if b_type == 11 { // Asteroids
++            let min_size_factor = if b_type == 0 || b_type == 100 {
++                0.006
++            } else if b_type >= 12 && b_type <= 14 {
++                // ISS, Starlink, GPS
++                0.0005
++            } else if b_type == 11 {
++                // Asteroids
+                 0.0008
+-            } else { 
+-                0.0025 
++            } else {
++                0.0025
+             };
+             let visual_radius = radius.max(dist * min_size_factor);
+-            
++
+             let scale = if b_type == 16 {
+-                nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::new(visual_radius * 1.4, visual_radius * 0.9, visual_radius * 0.7))
++                nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::new(
++                    visual_radius * 1.4,
++                    visual_radius * 0.9,
++                    visual_radius * 0.7,
++                ))
+             } else {
+                 nalgebra::Matrix4::new_scaling(visual_radius)
+             };
+             let translation = nalgebra::Matrix4::new_translation(&Vector3::new(p[0], p[1], p[2]));
+             let model = translation * scale;
+-            
+-            let is_selected = if i == selected_body_idx || Some(i) == hovered_body_idx { 1u32 } else { 0u32 };
++
++            let is_selected = if i == selected_body_idx || Some(i) == hovered_body_idx {
++                1u32
++            } else {
++                0u32
++            };
+ 
+             push_slots.push(PushConstants {
+                 model: model.into(),
+@@ -1340,7 +1386,11 @@ impl Renderer {
+ 
+             // Relativistic Jet for Quasar
+             if b_type == 21 {
+-                let jet_scale = nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::new(visual_radius * 0.3, visual_radius * 25.0, visual_radius * 0.3));
++                let jet_scale = nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::new(
++                    visual_radius * 0.3,
++                    visual_radius * 25.0,
++                    visual_radius * 0.3,
++                ));
+                 let jet_model = translation * jet_scale;
+                 push_slots.push(PushConstants {
+                     model: jet_model.into(),
+@@ -1355,8 +1405,16 @@ impl Renderer {
+             if b_type == 24 {
+                 let tail_len = visual_radius * 35.0;
+                 let y_axis = Vector3::y();
+-                let rotation = nalgebra::Rotation3::rotation_between(&y_axis, &Vector3::new(p[0], p[1], p[2]).normalize()).unwrap_or(nalgebra::Rotation3::identity());
+-                let tail_scale = nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::new(visual_radius * 1.5, tail_len, visual_radius * 1.5));
++                let rotation = nalgebra::Rotation3::rotation_between(
++                    &y_axis,
++                    &Vector3::new(p[0], p[1], p[2]).normalize(),
++                )
++                .unwrap_or(nalgebra::Rotation3::identity());
++                let tail_scale = nalgebra::Matrix4::new_nonuniform_scaling(&Vector3::new(
++                    visual_radius * 1.5,
++                    tail_len,
++                    visual_radius * 1.5,
++                ));
+                 let tail_model = translation * rotation.to_homogeneous() * tail_scale;
+                 push_slots.push(PushConstants {
+                     model: tail_model.into(),
+@@ -1376,22 +1434,23 @@ impl Renderer {
+                 has_saturn_rings = true;
+                 let p = bodies_pos_mass[i].pos_mass;
+                 let radius = body_radii.get(i).copied().unwrap_or(0.001);
+-                
++
+                 let dx = p[0] - camera_pos[0];
+                 let dy = p[1] - camera_pos[1];
+                 let dz = p[2] - camera_pos[2];
+-                let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+-                
++                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
++
+                 let min_size_factor = 0.0025;
+                 let visual_radius = radius.max(dist * min_size_factor);
+-                
++
+                 let scale = nalgebra::Matrix4::new_scaling(visual_radius);
+-                let translation = nalgebra::Matrix4::new_translation(&Vector3::new(p[0], p[1], p[2]));
++                let translation =
++                    nalgebra::Matrix4::new_translation(&Vector3::new(p[0], p[1], p[2]));
+                 saturn_model = (translation * scale).into();
+                 break;
+             }
+         }
+-        
++
+         let ring_slot_index = push_slots.len();
+         if has_saturn_rings {
+             push_slots.push(PushConstants {
+@@ -1404,12 +1463,13 @@ impl Renderer {
+         }
+ 
+         // Upload the entire push buffer at once!
+-        self.queue.write_buffer(&self.push_buffer, 0, bytemuck::cast_slice(&push_slots));
++        self.queue
++            .write_buffer(&self.push_buffer, 0, bytemuck::cast_slice(&push_slots));
+ 
+         // 3. Assemble dynamic orbit trails into orbit vertex buffer
+         let mut flat_orbit_vertices = Vec::new();
+         let mut orbit_draw_calls = Vec::new(); // Vec of (start_vertex, count) for each planet orbit
+-        
++
+         for i in 0..trails.len() {
+             let trail = &trails[i];
+             let start = flat_orbit_vertices.len() as u32;
+@@ -1494,23 +1554,39 @@ impl Renderer {
+             for i in 0..num_spheres {
+                 let offset = ((sphere_slot_start + i) * 256) as wgpu::DynamicOffset;
+                 rpass.set_bind_group(0, &self.bind_group, &[offset]);
+-                
++
+                 let b_type = body_types.get(i).copied().unwrap_or(101);
+                 if b_type == 12 {
+                     rpass.set_vertex_buffer(0, self.iss_vertex_buffer.slice(..));
+-                    rpass.set_index_buffer(self.iss_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
++                    rpass.set_index_buffer(
++                        self.iss_index_buffer.slice(..),
++                        wgpu::IndexFormat::Uint32,
++                    );
+                     rpass.draw_indexed(0..self.iss_index_count, 0, 0..1);
++                } else if b_type == 30 {
++                    rpass.set_vertex_buffer(0, self.cubesat_vertex_buffer.slice(..));
++                    rpass.set_index_buffer(self.cubesat_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
++                    rpass.draw_indexed(0..self.cubesat_index_count, 0, 0..1);
+                 } else if b_type == 13 {
+                     rpass.set_vertex_buffer(0, self.starlink_vertex_buffer.slice(..));
+-                    rpass.set_index_buffer(self.starlink_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
++                    rpass.set_index_buffer(
++                        self.starlink_index_buffer.slice(..),
++                        wgpu::IndexFormat::Uint32,
++                    );
+                     rpass.draw_indexed(0..self.starlink_index_count, 0, 0..1);
+                 } else if b_type == 14 {
+                     rpass.set_vertex_buffer(0, self.gps_vertex_buffer.slice(..));
+-                    rpass.set_index_buffer(self.gps_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
++                    rpass.set_index_buffer(
++                        self.gps_index_buffer.slice(..),
++                        wgpu::IndexFormat::Uint32,
++                    );
+                     rpass.draw_indexed(0..self.gps_index_count, 0, 0..1);
+                 } else {
+                     rpass.set_vertex_buffer(0, self.sphere_vertex_buffer.slice(..));
+-                    rpass.set_index_buffer(self.sphere_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
++                    rpass.set_index_buffer(
++                        self.sphere_index_buffer.slice(..),
++                        wgpu::IndexFormat::Uint32,
++                    );
+                     rpass.draw_indexed(0..self.sphere_index_count, 0, 0..1);
+                 }
+             }
+@@ -1607,7 +1683,11 @@ fn generate_sphere(lat_segments: u32, lon_segments: u32) -> (Vec<SphereVertex>,
+     (vertices, indices)
+ }
+ 
+-fn generate_ring(inner_radius: f32, outer_radius: f32, segments: u32) -> (Vec<SphereVertex>, Vec<u32>) {
++fn generate_ring(
++    inner_radius: f32,
++    outer_radius: f32,
++    segments: u32,
++) -> (Vec<SphereVertex>, Vec<u32>) {
+     let mut vertices = Vec::new();
+     let mut indices = Vec::new();
+     for i in 0..=segments {
+@@ -1641,68 +1721,352 @@ fn generate_ring(inner_radius: f32, outer_radius: f32, segments: u32) -> (Vec<Sp
+ }
+ 
+ fn add_quad_helper(
+-    p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3],
+-    normal: [f32; 3], uv_rect: [f32; 4],
+-    vertices: &mut Vec<SphereVertex>, indices: &mut Vec<u32>
++    p0: [f32; 3],
++    p1: [f32; 3],
++    p2: [f32; 3],
++    p3: [f32; 3],
++    normal: [f32; 3],
++    uv_rect: [f32; 4],
++    vertices: &mut Vec<SphereVertex>,
++    indices: &mut Vec<u32>,
+ ) {
+     let start = vertices.len() as u32;
+-    vertices.push(SphereVertex { pos: p0, normal, uv: [uv_rect[0], uv_rect[1]] });
+-    vertices.push(SphereVertex { pos: p1, normal, uv: [uv_rect[2], uv_rect[1]] });
+-    vertices.push(SphereVertex { pos: p2, normal, uv: [uv_rect[2], uv_rect[3]] });
+-    vertices.push(SphereVertex { pos: p3, normal, uv: [uv_rect[0], uv_rect[3]] });
+-    
++    vertices.push(SphereVertex {
++        pos: p0,
++        normal,
++        uv: [uv_rect[0], uv_rect[1]],
++    });
++    vertices.push(SphereVertex {
++        pos: p1,
++        normal,
++        uv: [uv_rect[2], uv_rect[1]],
++    });
++    vertices.push(SphereVertex {
++        pos: p2,
++        normal,
++        uv: [uv_rect[2], uv_rect[3]],
++    });
++    vertices.push(SphereVertex {
++        pos: p3,
++        normal,
++        uv: [uv_rect[0], uv_rect[3]],
++    });
++
+     indices.push(start);
+     indices.push(start + 1);
+     indices.push(start + 2);
+-    
++
+     indices.push(start);
+     indices.push(start + 2);
+     indices.push(start + 3);
+ }
+ 
+ fn add_box_helper(
+-    x_min: f32, x_max: f32, y_min: f32, y_max: f32, z_min: f32, z_max: f32,
++    x_min: f32,
++    x_max: f32,
++    y_min: f32,
++    y_max: f32,
++    z_min: f32,
++    z_max: f32,
+     uv_rect: [f32; 4],
+-    vertices: &mut Vec<SphereVertex>, indices: &mut Vec<u32>
++    vertices: &mut Vec<SphereVertex>,
++    indices: &mut Vec<u32>,
+ ) {
+-    add_quad_helper([x_min, y_min, z_max], [x_max, y_min, z_max], [x_max, y_max, z_max], [x_min, y_max, z_max], [0.0, 0.0, 1.0], uv_rect, vertices, indices);
+-    add_quad_helper([x_max, y_min, z_min], [x_min, y_min, z_min], [x_min, y_max, z_min], [x_max, y_max, z_min], [0.0, 0.0, -1.0], uv_rect, vertices, indices);
+-    add_quad_helper([x_min, y_max, z_max], [x_max, y_max, z_max], [x_max, y_max, z_min], [x_min, y_max, z_min], [0.0, 1.0, 0.0], uv_rect, vertices, indices);
+-    add_quad_helper([x_min, y_min, z_min], [x_max, y_min, z_min], [x_max, y_min, z_max], [x_min, y_min, z_max], [0.0, -1.0, 0.0], uv_rect, vertices, indices);
+-    add_quad_helper([x_max, y_min, z_max], [x_max, y_min, z_min], [x_max, y_max, z_min], [x_max, y_max, z_max], [1.0, 0.0, 0.0], uv_rect, vertices, indices);
+-    add_quad_helper([x_min, y_min, z_min], [x_min, y_min, z_max], [x_min, y_max, z_max], [x_min, y_max, z_min], [-1.0, 0.0, 0.0], uv_rect, vertices, indices);
++    add_quad_helper(
++        [x_min, y_min, z_max],
++        [x_max, y_min, z_max],
++        [x_max, y_max, z_max],
++        [x_min, y_max, z_max],
++        [0.0, 0.0, 1.0],
++        uv_rect,
++        vertices,
++        indices,
++    );
++    add_quad_helper(
++        [x_max, y_min, z_min],
++        [x_min, y_min, z_min],
++        [x_min, y_max, z_min],
++        [x_max, y_max, z_min],
++        [0.0, 0.0, -1.0],
++        uv_rect,
++        vertices,
++        indices,
++    );
++    add_quad_helper(
++        [x_min, y_max, z_max],
++        [x_max, y_max, z_max],
++        [x_max, y_max, z_min],
++        [x_min, y_max, z_min],
++        [0.0, 1.0, 0.0],
++        uv_rect,
++        vertices,
++        indices,
++    );
++    add_quad_helper(
++        [x_min, y_min, z_min],
++        [x_max, y_min, z_min],
++        [x_max, y_min, z_max],
++        [x_min, y_min, z_max],
++        [0.0, -1.0, 0.0],
++        uv_rect,
++        vertices,
++        indices,
++    );
++    add_quad_helper(
++        [x_max, y_min, z_max],
++        [x_max, y_min, z_min],
++        [x_max, y_max, z_min],
++        [x_max, y_max, z_max],
++        [1.0, 0.0, 0.0],
++        uv_rect,
++        vertices,
++        indices,
++    );
++    add_quad_helper(
++        [x_min, y_min, z_min],
++        [x_min, y_min, z_max],
++        [x_min, y_max, z_max],
++        [x_min, y_max, z_min],
++        [-1.0, 0.0, 0.0],
++        uv_rect,
++        vertices,
++        indices,
++    );
++}
++
++fn generate_cubesat() -> (Vec<SphereVertex>, Vec<u32>) {
++    // The exact OpenSCAD 1U model, exported to ASCII STL and embedded at
++    // compile time. Vertices are centred and normalised to a unit extent;
++    // AstroSim's per-body scale then renders it at the live entity size.
++    const STL: &str = include_str!("cubesat.stl");
++
++    let mut points: Vec<[f32; 3]> = Vec::new();
++    for line in STL.lines() {
++        let line = line.trim_start();
++        if let Some(rest) = line.strip_prefix("vertex ") {
++            let mut parts = rest.split_whitespace();
++            let x = parts.next().and_then(|v| v.parse::<f32>().ok());
++            let y = parts.next().and_then(|v| v.parse::<f32>().ok());
++            let z = parts.next().and_then(|v| v.parse::<f32>().ok());
++            if let (Some(x), Some(y), Some(z)) = (x, y, z) {
++                points.push([x, y, z]);
++            }
++        }
++    }
++
++    let mut min = [f32::MAX; 3];
++    let mut max = [f32::MIN; 3];
++    for p in &points {
++        for i in 0..3 {
++            min[i] = min[i].min(p[i]);
++            max[i] = max[i].max(p[i]);
++        }
++    }
++    let center = [
++        (min[0] + max[0]) * 0.5,
++        (min[1] + max[1]) * 0.5,
++        (min[2] + max[2]) * 0.5,
++    ];
++    let extent = (max[0] - min[0])
++        .max(max[1] - min[1])
++        .max(max[2] - min[2])
++        .max(1.0);
++    let scale = 1.0 / extent;
++
++    let mut vertices = Vec::with_capacity(points.len());
++    let mut indices = Vec::with_capacity(points.len());
++    for tri in points.chunks_exact(3) {
++        let a = tri[0];
++        let b = tri[1];
++        let c = tri[2];
++        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
++        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
++        let n = [
++            ab[1] * ac[2] - ab[2] * ac[1],
++            ab[2] * ac[0] - ab[0] * ac[2],
++            ab[0] * ac[1] - ab[1] * ac[0],
++        ];
++        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
++        let normal = [n[0] / len, n[1] / len, n[2] / len];
++        for p in tri {
++            let index = vertices.len() as u32;
++            vertices.push(SphereVertex {
++                pos: [
++                    (p[0] - center[0]) * scale,
++                    (p[1] - center[1]) * scale,
++                    (p[2] - center[2]) * scale,
++                ],
++                normal,
++                uv: [0.0, 0.0],
++            });
++            indices.push(index);
++        }
++    }
++    (vertices, indices)
+ }
+ 
+ fn generate_iss() -> (Vec<SphereVertex>, Vec<u32>) {
+     let mut vertices = Vec::new();
+     let mut indices = Vec::new();
+-    
++
+     // ISS components:
+     // 1. Central backbone truss (along X)
+-    add_box_helper(-0.85, 0.85, -0.02, 0.02, -0.02, 0.02, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.85,
++        0.85,
++        -0.02,
++        0.02,
++        -0.02,
++        0.02,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 2. Pressurized Modules (cluster at the center)
+-    add_box_helper(-0.06, 0.06, -0.06, 0.06, -0.25, 0.25, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
+-    add_box_helper(-0.16, 0.16, -0.05, 0.05, -0.05, 0.05, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
+-    add_box_helper(-0.05, 0.05, -0.12, 0.12, -0.05, 0.05, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.06,
++        0.06,
++        -0.06,
++        0.06,
++        -0.25,
++        0.25,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_box_helper(
++        -0.16,
++        0.16,
++        -0.05,
++        0.05,
++        -0.05,
++        0.05,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_box_helper(
++        -0.05,
++        0.05,
++        -0.12,
++        0.12,
++        -0.05,
++        0.05,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 3. Left transverse truss and solar wings at x = -0.75
+-    add_box_helper(-0.77, -0.73, -0.02, 0.02, -0.4, 0.4, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.77,
++        -0.73,
++        -0.02,
++        0.02,
++        -0.4,
++        0.4,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+     // Left Wing 1 (Z: 0.08 to 0.42) - Top and bottom double-sided
+-    add_quad_helper([-0.95, 0.0, 0.42], [-0.55, 0.0, 0.42], [-0.55, 0.0, 0.08], [-0.95, 0.0, 0.08], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([-0.55, 0.0, 0.42], [-0.95, 0.0, 0.42], [-0.95, 0.0, 0.08], [-0.55, 0.0, 0.08], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [-0.95, 0.0, 0.42],
++        [-0.55, 0.0, 0.42],
++        [-0.55, 0.0, 0.08],
++        [-0.95, 0.0, 0.08],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [-0.55, 0.0, 0.42],
++        [-0.95, 0.0, 0.42],
++        [-0.95, 0.0, 0.08],
++        [-0.55, 0.0, 0.08],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+     // Left Wing 2 (Z: -0.42 to -0.08)
+-    add_quad_helper([-0.95, 0.0, -0.08], [-0.55, 0.0, -0.08], [-0.55, 0.0, -0.42], [-0.95, 0.0, -0.42], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([-0.55, 0.0, -0.08], [-0.95, 0.0, -0.08], [-0.95, 0.0, -0.42], [-0.55, 0.0, -0.42], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [-0.95, 0.0, -0.08],
++        [-0.55, 0.0, -0.08],
++        [-0.55, 0.0, -0.42],
++        [-0.95, 0.0, -0.42],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [-0.55, 0.0, -0.08],
++        [-0.95, 0.0, -0.08],
++        [-0.95, 0.0, -0.42],
++        [-0.55, 0.0, -0.42],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 4. Right transverse truss and solar wings at x = 0.75
+-    add_box_helper(0.73, 0.77, -0.02, 0.02, -0.4, 0.4, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        0.73,
++        0.77,
++        -0.02,
++        0.02,
++        -0.4,
++        0.4,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+     // Right Wing 1 (Z: 0.08 to 0.42)
+-    add_quad_helper([0.55, 0.0, 0.42], [0.95, 0.0, 0.42], [0.95, 0.0, 0.08], [0.55, 0.0, 0.08], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([0.95, 0.0, 0.42], [0.55, 0.0, 0.42], [0.55, 0.0, 0.08], [0.95, 0.0, 0.08], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [0.55, 0.0, 0.42],
++        [0.95, 0.0, 0.42],
++        [0.95, 0.0, 0.08],
++        [0.55, 0.0, 0.08],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [0.95, 0.0, 0.42],
++        [0.55, 0.0, 0.42],
++        [0.55, 0.0, 0.08],
++        [0.95, 0.0, 0.08],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+     // Right Wing 2 (Z: -0.42 to -0.08)
+-    add_quad_helper([0.55, 0.0, -0.08], [0.95, 0.0, -0.08], [0.95, 0.0, -0.42], [0.55, 0.0, -0.42], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([0.95, 0.0, -0.08], [0.55, 0.0, -0.08], [0.55, 0.0, -0.42], [0.95, 0.0, -0.42], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [0.55, 0.0, -0.08],
++        [0.95, 0.0, -0.08],
++        [0.95, 0.0, -0.42],
++        [0.55, 0.0, -0.42],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [0.95, 0.0, -0.08],
++        [0.55, 0.0, -0.08],
++        [0.55, 0.0, -0.42],
++        [0.95, 0.0, -0.42],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     (vertices, indices)
+ }
+@@ -1710,17 +2074,55 @@ fn generate_iss() -> (Vec<SphereVertex>, Vec<u32>) {
+ fn generate_starlink() -> (Vec<SphereVertex>, Vec<u32>) {
+     let mut vertices = Vec::new();
+     let mut indices = Vec::new();
+-    
++
+     // Starlink components:
+     // 1. Flat central chassis (box)
+-    add_box_helper(-0.15, 0.15, -0.04, 0.04, -0.15, 0.15, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.15,
++        0.15,
++        -0.04,
++        0.04,
++        -0.15,
++        0.15,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 2. Connector boom to solar panel (only on left side, -x)
+-    add_box_helper(-0.25, -0.15, -0.015, 0.015, -0.02, 0.02, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.25,
++        -0.15,
++        -0.015,
++        0.015,
++        -0.02,
++        0.02,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 3. Single large solar array panel (extending on -x side)
+-    add_quad_helper([-0.9, 0.0, 0.18], [-0.25, 0.0, 0.18], [-0.25, 0.0, -0.18], [-0.9, 0.0, -0.18], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([-0.25, 0.0, 0.18], [-0.9, 0.0, 0.18], [-0.9, 0.0, -0.18], [-0.25, 0.0, -0.18], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [-0.9, 0.0, 0.18],
++        [-0.25, 0.0, 0.18],
++        [-0.25, 0.0, -0.18],
++        [-0.9, 0.0, -0.18],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [-0.25, 0.0, 0.18],
++        [-0.9, 0.0, 0.18],
++        [-0.9, 0.0, -0.18],
++        [-0.25, 0.0, -0.18],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     (vertices, indices)
+ }
+@@ -1728,26 +2130,112 @@ fn generate_starlink() -> (Vec<SphereVertex>, Vec<u32>) {
+ fn generate_gps() -> (Vec<SphereVertex>, Vec<u32>) {
+     let mut vertices = Vec::new();
+     let mut indices = Vec::new();
+-    
++
+     // GPS components:
+     // 1. Central boxy chassis (cube)
+-    add_box_helper(-0.12, 0.12, -0.12, 0.12, -0.12, 0.12, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.12,
++        0.12,
++        -0.12,
++        0.12,
++        -0.12,
++        0.12,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 2. Top-facing dish/aperture antenna (pointing along +y)
+-    add_box_helper(-0.04, 0.04, 0.12, 0.22, -0.04, 0.04, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
+-    add_box_helper(-0.06, 0.06, 0.22, 0.24, -0.06, 0.06, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.04,
++        0.04,
++        0.12,
++        0.22,
++        -0.04,
++        0.04,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_box_helper(
++        -0.06,
++        0.06,
++        0.22,
++        0.24,
++        -0.06,
++        0.06,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 3. Connector booms for left/right panels
+-    add_box_helper(-0.25, -0.12, -0.015, 0.015, -0.015, 0.015, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
+-    add_box_helper(0.12, 0.25, -0.015, 0.015, -0.015, 0.015, [0.0, 0.0, 0.0, 0.0], &mut vertices, &mut indices);
++    add_box_helper(
++        -0.25,
++        -0.12,
++        -0.015,
++        0.015,
++        -0.015,
++        0.015,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_box_helper(
++        0.12,
++        0.25,
++        -0.015,
++        0.015,
++        -0.015,
++        0.015,
++        [0.0, 0.0, 0.0, 0.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     // 4. Two symmetrical solar panel wings
+     // Left wing
+-    add_quad_helper([-0.85, 0.0, 0.16], [-0.25, 0.0, 0.16], [-0.25, 0.0, -0.16], [-0.85, 0.0, -0.16], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([-0.25, 0.0, 0.16], [-0.85, 0.0, 0.16], [-0.85, 0.0, -0.16], [-0.25, 0.0, -0.16], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [-0.85, 0.0, 0.16],
++        [-0.25, 0.0, 0.16],
++        [-0.25, 0.0, -0.16],
++        [-0.85, 0.0, -0.16],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [-0.25, 0.0, 0.16],
++        [-0.85, 0.0, 0.16],
++        [-0.85, 0.0, -0.16],
++        [-0.25, 0.0, -0.16],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+     // Right wing
+-    add_quad_helper([0.25, 0.0, 0.16], [0.85, 0.0, 0.16], [0.85, 0.0, -0.16], [0.25, 0.0, -0.16], [0.0, 1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
+-    add_quad_helper([0.85, 0.0, 0.16], [0.25, 0.0, 0.16], [0.25, 0.0, -0.16], [0.85, 0.0, -0.16], [0.0, -1.0, 0.0], [0.1, 0.1, 1.0, 1.0], &mut vertices, &mut indices);
++    add_quad_helper(
++        [0.25, 0.0, 0.16],
++        [0.85, 0.0, 0.16],
++        [0.85, 0.0, -0.16],
++        [0.25, 0.0, -0.16],
++        [0.0, 1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
++    add_quad_helper(
++        [0.85, 0.0, 0.16],
++        [0.25, 0.0, 0.16],
++        [0.25, 0.0, -0.16],
++        [0.85, 0.0, -0.16],
++        [0.0, -1.0, 0.0],
++        [0.1, 0.1, 1.0, 1.0],
++        &mut vertices,
++        &mut indices,
++    );
+ 
+     (vertices, indices)
+ }
+diff --git a/src/solar_system.json b/src/solar_system.json
+index ecccc69..72d99f9 100644
+--- a/src/solar_system.json
++++ b/src/solar_system.json
+@@ -2,191 +2,269 @@
+   "bodies": [
+     {
+       "name": "Sun",
+-      "mass": 1.989e30,
++      "mass": 1.989e+30,
+       "radius": 0.163,
+       "body_type": 0,
+       "orbit": null
+     },
+     {
+       "name": "Mercury",
+-      "mass": 3.285e23,
++      "mass": 3.285e+23,
+       "radius": 0.00057,
+       "body_type": 1,
+       "orbit": {
+-        "a0": 0.38709927, "a_dot": 0.00000037,
+-        "e0": 0.20563593, "e_dot": 0.00001906,
+-        "i0": 7.00497902, "i_dot": -0.00594749,
+-        "L0": 252.25032350, "L_dot": 149472.67411175,
+-        "varpi0": 77.45779628, "varpi_dot": 0.16047689,
+-        "omega0": 48.33076593, "omega_dot": -0.12534081
++        "a0": 0.38709927,
++        "a_dot": 3.7e-07,
++        "e0": 0.20563593,
++        "e_dot": 1.906e-05,
++        "i0": 7.00497902,
++        "i_dot": -0.00594749,
++        "L0": 252.2503235,
++        "L_dot": 149472.67411175,
++        "varpi0": 77.45779628,
++        "varpi_dot": 0.16047689,
++        "omega0": 48.33076593,
++        "omega_dot": -0.12534081
+       }
+     },
+     {
+       "name": "Venus",
+-      "mass": 4.867e24,
++      "mass": 4.867e+24,
+       "radius": 0.00142,
+       "body_type": 2,
+       "orbit": {
+-        "a0": 0.72333566, "a_dot": 0.00000390,
+-        "e0": 0.00677672, "e_dot": -0.00004107,
+-        "i0": 3.39467605, "i_dot": -0.00078890,
+-        "L0": 181.97909950, "L_dot": 58517.81538729,
+-        "varpi0": 131.60246718, "varpi_dot": 0.00268329,
+-        "omega0": 76.67984255, "omega_dot": -0.27769418
++        "a0": 0.72333566,
++        "a_dot": 3.9e-06,
++        "e0": 0.00677672,
++        "e_dot": -4.107e-05,
++        "i0": 3.39467605,
++        "i_dot": -0.0007889,
++        "L0": 181.9790995,
++        "L_dot": 58517.81538729,
++        "varpi0": 131.60246718,
++        "varpi_dot": 0.00268329,
++        "omega0": 76.67984255,
++        "omega_dot": -0.27769418
+       }
+     },
+     {
+       "name": "Earth",
+-      "mass": 5.972e24,
++      "mass": 5.972e+24,
+       "radius": 0.0015,
+       "body_type": 3,
+       "orbit": {
+-        "a0": 1.00000261, "a_dot": 0.00000562,
+-        "e0": 0.01671123, "e_dot": -0.00004392,
+-        "i0": -0.00001531, "i_dot": -0.01294668,
+-        "L0": 100.46457166, "L_dot": 35999.37244981,
+-        "varpi0": 102.93768193, "varpi_dot": 0.32327364,
+-        "omega0": 0.0, "omega_dot": 0.0
++        "a0": 1.00000261,
++        "a_dot": 5.62e-06,
++        "e0": 0.01671123,
++        "e_dot": -4.392e-05,
++        "i0": -1.531e-05,
++        "i_dot": -0.01294668,
++        "L0": 100.46457166,
++        "L_dot": 35999.37244981,
++        "varpi0": 102.93768193,
++        "varpi_dot": 0.32327364,
++        "omega0": 0.0,
++        "omega_dot": 0.0
+       }
+     },
+     {
+       "name": "Mars",
+-      "mass": 6.390e23,
++      "mass": 6.39e+23,
+       "radius": 0.0008,
+       "body_type": 4,
+       "orbit": {
+-        "a0": 1.52371034, "a_dot": 0.00001847,
+-        "e0": 0.09339410, "e_dot": 0.00007882,
+-        "i0": 1.84969142, "i_dot": -0.00813131,
+-        "L0": -4.55343205, "L_dot": 19140.30268499,
+-        "varpi0": -23.94362959, "varpi_dot": 0.44441088,
+-        "omega0": 49.55953891, "omega_dot": -0.29257343
++        "a0": 1.52371034,
++        "a_dot": 1.847e-05,
++        "e0": 0.0933941,
++        "e_dot": 7.882e-05,
++        "i0": 1.84969142,
++        "i_dot": -0.00813131,
++        "L0": -4.55343205,
++        "L_dot": 19140.30268499,
++        "varpi0": -23.94362959,
++        "varpi_dot": 0.44441088,
++        "omega0": 49.55953891,
++        "omega_dot": -0.29257343
+       }
+     },
+     {
+       "name": "Jupiter",
+-      "mass": 1.898e27,
++      "mass": 1.898e+27,
+       "radius": 0.0168,
+       "body_type": 5,
+       "orbit": {
+-        "a0": 5.20288700, "a_dot": -0.00011607,
+-        "e0": 0.04838624, "e_dot": -0.00013253,
+-        "i0": 1.30439695, "i_dot": -0.00183714,
+-        "L0": 34.39644051, "L_dot": 3034.74612775,
+-        "varpi0": 14.72847983, "varpi_dot": 0.21252668,
+-        "omega0": 100.47390909, "omega_dot": 0.20469106
++        "a0": 5.202887,
++        "a_dot": -0.00011607,
++        "e0": 0.04838624,
++        "e_dot": -0.00013253,
++        "i0": 1.30439695,
++        "i_dot": -0.00183714,
++        "L0": 34.39644051,
++        "L_dot": 3034.74612775,
++        "varpi0": 14.72847983,
++        "varpi_dot": 0.21252668,
++        "omega0": 100.47390909,
++        "omega_dot": 0.20469106
+       }
+     },
+     {
+       "name": "Saturn",
+-      "mass": 5.683e26,
++      "mass": 5.683e+26,
+       "radius": 0.0142,
+       "body_type": 6,
+       "orbit": {
+-        "a0": 9.53667594, "a_dot": -0.00125060,
+-        "e0": 0.05386179, "e_dot": -0.00050991,
+-        "i0": 2.48599187, "i_dot": 0.00193609,
+-        "L0": 49.95424423, "L_dot": 1222.49362201,
+-        "varpi0": 92.59887831, "varpi_dot": -0.41897216,
+-        "omega0": 113.66242448, "omega_dot": -0.28867794
++        "a0": 9.53667594,
++        "a_dot": -0.0012506,
++        "e0": 0.05386179,
++        "e_dot": -0.00050991,
++        "i0": 2.48599187,
++        "i_dot": 0.00193609,
++        "L0": 49.95424423,
++        "L_dot": 1222.49362201,
++        "varpi0": 92.59887831,
++        "varpi_dot": -0.41897216,
++        "omega0": 113.66242448,
++        "omega_dot": -0.28867794
+       }
+     },
+     {
+       "name": "Uranus",
+-      "mass": 8.681e25,
++      "mass": 8.681e+25,
+       "radius": 0.006,
+       "body_type": 7,
+       "orbit": {
+-        "a0": 19.18916464, "a_dot": -0.00196176,
+-        "e0": 0.04725744, "e_dot": -0.00004397,
+-        "i0": 0.77263783, "i_dot": -0.00242939,
+-        "L0": 313.23810451, "L_dot": 428.48202785,
+-        "varpi0": 170.95427630, "varpi_dot": 0.40805281,
+-        "omega0": 74.01692503, "omega_dot": 0.04240589
++        "a0": 19.18916464,
++        "a_dot": -0.00196176,
++        "e0": 0.04725744,
++        "e_dot": -4.397e-05,
++        "i0": 0.77263783,
++        "i_dot": -0.00242939,
++        "L0": 313.23810451,
++        "L_dot": 428.48202785,
++        "varpi0": 170.9542763,
++        "varpi_dot": 0.40805281,
++        "omega0": 74.01692503,
++        "omega_dot": 0.04240589
+       }
+     },
+     {
+       "name": "Neptune",
+-      "mass": 1.024e26,
++      "mass": 1.024e+26,
+       "radius": 0.0058,
+       "body_type": 8,
+       "orbit": {
+-        "a0": 30.06992276, "a_dot": 0.00026291,
+-        "e0": 0.00859048, "e_dot": 0.00005105,
+-        "i0": 1.77004347, "i_dot": 0.00035372,
+-        "L0": -55.12002969, "L_dot": 218.45945325,
+-        "varpi0": 44.96476227, "varpi_dot": -0.32241464,
+-        "omega0": 131.78422574, "omega_dot": -0.00508664
++        "a0": 30.06992276,
++        "a_dot": 0.00026291,
++        "e0": 0.00859048,
++        "e_dot": 5.105e-05,
++        "i0": 1.77004347,
++        "i_dot": 0.00035372,
++        "L0": -55.12002969,
++        "L_dot": 218.45945325,
++        "varpi0": 44.96476227,
++        "varpi_dot": -0.32241464,
++        "omega0": 131.78422574,
++        "omega_dot": -0.00508664
+       }
+     },
+     {
+       "name": "Pluto",
+-      "mass": 1.303e22,
++      "mass": 1.303e+22,
+       "radius": 0.00028,
+       "body_type": 10,
+       "orbit": {
+-        "a0": 39.48168677, "a_dot": -0.00076912,
+-        "e0": 0.24880766, "e_dot": 0.00006465,
+-        "i0": 17.14175, "i_dot": 0.003075,
+-        "L0": 238.92881, "L_dot": 145.20775,
+-        "varpi0": 113.76329, "varpi_dot": -0.036736,
+-        "omega0": 110.30347, "omega_dot": -0.010369
++        "a0": 39.48168677,
++        "a_dot": -0.00076912,
++        "e0": 0.24880766,
++        "e_dot": 6.465e-05,
++        "i0": 17.14175,
++        "i_dot": 0.003075,
++        "L0": 238.92881,
++        "L_dot": 145.20775,
++        "varpi0": 113.76329,
++        "varpi_dot": -0.036736,
++        "omega0": 110.30347,
++        "omega_dot": -0.010369
+       }
+     },
+     {
+       "name": "Ceres",
+-      "mass": 9.393e20,
++      "mass": 9.393e+20,
+       "radius": 0.00011,
+       "body_type": 11,
+       "orbit": {
+-        "a0": 2.7653485, "a_dot": 0.0,
+-        "e0": 0.07913825, "e_dot": 0.0,
+-        "i0": 10.58682, "i_dot": 0.0,
+-        "L0": 266.39345, "L_dot": 7827.78,
+-        "varpi0": 152.98301, "varpi_dot": 0.0,
+-        "omega0": 72.58981, "omega_dot": 0.0
++        "a0": 2.7653485,
++        "a_dot": 0.0,
++        "e0": 0.07913825,
++        "e_dot": 0.0,
++        "i0": 10.58682,
++        "i_dot": 0.0,
++        "L0": 266.39345,
++        "L_dot": 7827.78,
++        "varpi0": 152.98301,
++        "varpi_dot": 0.0,
++        "omega0": 72.58981,
++        "omega_dot": 0.0
+       }
+     },
+     {
+       "name": "Eris",
+-      "mass": 1.66e22,
++      "mass": 1.66e+22,
+       "radius": 0.00027,
+       "body_type": 15,
+       "orbit": {
+-        "a0": 67.69, "a_dot": 0.0,
+-        "e0": 0.44, "e_dot": 0.0,
+-        "i0": 44.187, "i_dot": 0.0,
+-        "L0": 32.79, "L_dot": 64.63,
+-        "varpi0": 187.68, "varpi_dot": 0.0,
+-        "omega0": 36.02, "omega_dot": 0.0
++        "a0": 67.69,
++        "a_dot": 0.0,
++        "e0": 0.44,
++        "e_dot": 0.0,
++        "i0": 44.187,
++        "i_dot": 0.0,
++        "L0": 32.79,
++        "L_dot": 64.63,
++        "varpi0": 187.68,
++        "varpi_dot": 0.0,
++        "omega0": 36.02,
++        "omega_dot": 0.0
+       }
+     },
+     {
+       "name": "Haumea",
+-      "mass": 4.006e21,
++      "mass": 4.006e+21,
+       "radius": 0.0002,
+       "body_type": 16,
+       "orbit": {
+-        "a0": 43.12, "a_dot": 0.0,
+-        "e0": 0.196, "e_dot": 0.0,
+-        "i0": 28.21, "i_dot": 0.0,
+-        "L0": 219.42, "L_dot": 127.14,
+-        "varpi0": 1.21, "varpi_dot": 0.0,
+-        "omega0": 122.17, "omega_dot": 0.0
++        "a0": 43.12,
++        "a_dot": 0.0,
++        "e0": 0.196,
++        "e_dot": 0.0,
++        "i0": 28.21,
++        "i_dot": 0.0,
++        "L0": 219.42,
++        "L_dot": 127.14,
++        "varpi0": 1.21,
++        "varpi_dot": 0.0,
++        "omega0": 122.17,
++        "omega_dot": 0.0
+       }
+     },
+     {
+       "name": "Makemake",
+-      "mass": 3.1e21,
++      "mass": 3.1e+21,
+       "radius": 0.00017,
+       "body_type": 17,
+       "orbit": {
+-        "a0": 45.384, "a_dot": 0.0,
+-        "e0": 0.1635, "e_dot": 0.0,
+-        "i0": 29.034, "i_dot": 0.0,
+-        "L0": 184.432, "L_dot": 117.75,
+-        "varpi0": 16.015, "varpi_dot": 0.0,
+-        "omega0": 79.261, "omega_dot": 0.0
++        "a0": 45.384,
++        "a_dot": 0.0,
++        "e0": 0.1635,
++        "e_dot": 0.0,
++        "i0": 29.034,
++        "i_dot": 0.0,
++        "L0": 184.432,
++        "L_dot": 117.75,
++        "varpi0": 16.015,
++        "varpi_dot": 0.0,
++        "omega0": 79.261,
++        "omega_dot": 0.0
+       }
+     }
+   ],
+@@ -230,7 +308,7 @@
+       "longitude_ascending_node": 35.0,
+       "argument_periapsis": 200.0,
+       "mean_anomaly_epoch": 0.0,
+-      "radius_render": 0.00008,
++      "radius_render": 8e-05,
+       "body_type": 11
+     },
+     {
+@@ -290,7 +368,7 @@
+       "longitude_ascending_node": 10.0,
+       "argument_periapsis": 5.0,
+       "mean_anomaly_epoch": 0.0,
+-      "radius_render": 0.00005,
++      "radius_render": 5e-05,
+       "body_type": 11
+     },
+     {
+@@ -302,7 +380,7 @@
+       "longitude_ascending_node": 20.0,
+       "argument_periapsis": 45.0,
+       "mean_anomaly_epoch": 120.0,
+-      "radius_render": 0.00006,
++      "radius_render": 6e-05,
+       "body_type": 15
+     },
+     {
+@@ -374,7 +452,7 @@
+       "longitude_ascending_node": 100.0,
+       "argument_periapsis": 45.0,
+       "mean_anomaly_epoch": 0.0,
+-      "radius_render": 0.00005,
++      "radius_render": 5e-05,
+       "body_type": 11
+     },
+     {
+@@ -429,7 +507,7 @@
+       "name": "Triton",
+       "parent_name": "Neptune",
+       "semi_major_axis": 354759000.0,
+-      "eccentricity": 0.00001,
++      "eccentricity": 1e-05,
+       "inclination": 156.8,
+       "longitude_ascending_node": 140.0,
+       "argument_periapsis": 220.0,
+@@ -460,7 +538,7 @@
+       "longitude_ascending_node": 80.0,
+       "argument_periapsis": 0.0,
+       "mean_anomaly_epoch": 0.0,
+-      "radius_render": 0.00008,
++      "radius_render": 8e-05,
+       "body_type": 12
+     },
+     {
+@@ -472,7 +550,7 @@
+       "longitude_ascending_node": 120.0,
+       "argument_periapsis": 45.0,
+       "mean_anomaly_epoch": 10.0,
+-      "radius_render": 0.000015,
++      "radius_render": 1.5e-05,
+       "body_type": 13
+     },
+     {
+@@ -484,7 +562,7 @@
+       "longitude_ascending_node": 120.0,
+       "argument_periapsis": 45.0,
+       "mean_anomaly_epoch": 180.0,
+-      "radius_render": 0.000015,
++      "radius_render": 1.5e-05,
+       "body_type": 13
+     },
+     {
+@@ -496,8 +574,20 @@
+       "longitude_ascending_node": 240.0,
+       "argument_periapsis": 90.0,
+       "mean_anomaly_epoch": 0.0,
+-      "radius_render": 0.00003,
++      "radius_render": 3e-05,
+       "body_type": 14
++    },
++    {
++      "name": "CUBESAT",
++      "parent_name": "Earth",
++      "semi_major_axis": 6928137.0,
++      "eccentricity": 0.0,
++      "inclination": 51.6,
++      "longitude_ascending_node": 30.0,
++      "argument_periapsis": 0.0,
++      "mean_anomaly_epoch": 0.0,
++      "radius_render": 1e-05,
++      "body_type": 30
+     }
+   ]
+ }

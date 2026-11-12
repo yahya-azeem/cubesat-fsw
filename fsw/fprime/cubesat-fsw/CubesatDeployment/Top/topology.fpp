@@ -35,6 +35,7 @@ module CubesatDeployment {
     instance powerManager
     instance dataStore
     instance radioDriver
+    instance astroNav
 
   # ----------------------------------------------------------------------
   # Pattern graph specifiers
@@ -113,6 +114,7 @@ module CubesatDeployment {
       rateGroup_1Hz.RateGroupMemberOut[5] -> CdhCore.cmdDisp.run
       rateGroup_1Hz.RateGroupMemberOut[6] -> powerManager.schedIn
       rateGroup_1Hz.RateGroupMemberOut[7] -> dataStore.schedIn
+      rateGroup_1Hz.RateGroupMemberOut[8] -> astroNav.schedIn
 
       # PA gate: PowerManager owns the policy, RadioDriver owns the pin
       powerManager.paEnable -> radioDriver.paEnableIn

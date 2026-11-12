@@ -18,3 +18,6 @@ logs/
 third_party/cspice/
 cad/*.stl
 rust/target/
+
+# AstroSim wasm build tree (cloned by build-wasm.sh)
+integrations/astrosim/upstream/

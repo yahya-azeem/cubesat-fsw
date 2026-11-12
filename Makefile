@@ -20,7 +20,7 @@ ARM_TARGET := thumbv7em-none-eabihf
 .PHONY: help all avr riscv rust fsw build clean sim vcd wave \
         debug debug-avr debug-riscv verify doctor esp32 \
         rust-test rust-riscv rust-arm rust-riscv-run rust-check rust-fmt \
-        fprime fprime-run fprime-ut fprime-gds gds-demo demo-guided cad cad-preview cad-check cspice
+        fprime fprime-run fprime-ut fprime-gds gds-demo demo-guided cad cad-preview cad-check cspice orbit-view astrosim
 
 help:
 	@echo "embedded - headless FOSS toolchain (F´/C++ flight software)"
@@ -29,13 +29,15 @@ help:
 	@echo "  make fsw           build + run the C++ flight-policy and LittleFS tests"
 	@echo "  make fprime        build the F´ deployment (PowerManager + DataStore)"
 	@echo "  make fprime-run    run the deployment headlessly for 5 s"
-	@echo "  make fprime-ut     run the F´ component unit tests (11 tests)"
+	@echo "  make fprime-ut     run the F´ component unit tests (14 tests)"
 	@echo "  make fprime-gds    launch the browser GDS on http://localhost:5000"
 	@echo "  make gds-demo      drive a full pass through the live GDS"
 	@echo "  make demo-guided   guided pass: press Enter step by step"
 	@echo "  make cad           export 1U/exploded STL from cad/cubesat.scad"
 	@echo "  make cad-preview   render the CAD PNGs"
 	@echo "  make cspice        download NAIF CSPICE (43 MB, no sudo)"
+	@echo "  make orbit-view    serve the live 3D orbit view (:8787)"
+	@echo "  make astrosim      build AstroSim wasm with the live CubeSat patch"
 	@echo "  make rust          test mission logic + build both Rust firmwares"
 	@echo "  make rust-test     host unit tests for cubesat-core"
 	@echo "  make rust-riscv    build rv32 firmware (QEMU virt)"
@@ -69,7 +71,7 @@ fprime-run: fprime
 	cd $(FPRIME_DIR) && timeout 5 $(FPRIME_BIN) < /dev/null || true
 
 fprime-ut:
-	@set -e; for c in PowerManager DataStore RadioDriver; do \
+	@set -e; for c in PowerManager DataStore RadioDriver AstroNav; do \
 		echo "=== $$c ==="; \
 		(cd $(FPRIME_DIR)/Cubesat/Components/$$c && $(FPRIME_SRC) fprime-util check); \
 	done
@@ -105,6 +107,12 @@ cad-check: cad
 
 cspice:
 	$(ROOT)/setup/install-cspice.sh
+
+orbit-view:
+	python3 $(ROOT)/integrations/orbit-view/serve.py
+
+astrosim:
+	$(ROOT)/integrations/astrosim/build-wasm.sh
 
 rust: rust-test rust-arm rust-riscv
 

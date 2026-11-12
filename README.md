@@ -18,6 +18,7 @@ embedded/
 ├── avr/                      # atmega328p C17 demo + simavr VCD harness
 ├── riscv/                    # bare-metal rv32 C17 demo (QEMU virt)
 ├── rust/                     # host reference model + QEMU sandbox
+├── integrations/              # live 3D orbit view + AstroSim adapter
 ├── cad/                      # OpenSCAD 1U packaging model
 ├── tools/gen-pac.sh          # VA41620 PAC from the vendor SVD
 ├── setup/{install,install-fprime,verify}.sh
@@ -60,7 +61,7 @@ For bash/zsh use `bin/activate` instead. The Makefile sources it under
 ```bash
 make fsw           # 146 host assertions across two suites
 make fprime        # build the F´ deployment (PowerManager + DataStore)
-make fprime-ut     # 11 F´ component tests (fprime-util check + GTest)
+make fprime-ut     # 14 F´ component tests (fprime-util check + GTest)
 make fprime-run    # boot it headlessly; LittleFS prints StorageReady
 make fprime-gds    # browser GDS on http://localhost:5000
 ```
@@ -75,6 +76,9 @@ make fprime-gds    # browser GDS on http://localhost:5000
   before keying the PA, latches a fault otherwise.
 - **DataStore** — passive component; appends 8-byte housekeeping records to
   `hk.log` at 1 Hz.
+- **AstroNav** — passive component; loads CSPICE kernels and publishes
+  altitude, speed, position, velocity, Sun vector and sub-satellite point at
+  1 Hz from the demo SPK.
 - **Spice** — C++23, `std::expected`-based wrapper around NAIF CSPICE:
   bounded strings, RETURN error mode, finite-state and orthonormal-matrix
   checks, RAII kernels. See `fsw/fprime/cubesat-fsw/Cubesat/Spice/README.md`.
@@ -151,6 +155,42 @@ The demo sequence and the expected telemetry:
 That last row is the point: the battery guard is enforced in the component,
 not in the UI, so the same refusal happens from the GDS, a script, or the
 flight sequencer.
+
+## Live 3D view
+
+![live orbit](integrations/orbit-view/live.png)
+
+`integrations/orbit-view` is a zero-build Three.js view of the live AstroNav
+telemetry: Earth, the predicted orbit, the satellite, the Sun vector and the
+nadir point. It reads the newest GDS channel log through a small Python
+bridge, so the flight software knows nothing about the web UI.
+
+```bash
+python3 integrations/orbit-view/serve.py     # http://localhost:8787
+```
+
+`integrations/astrosim` takes this further: it patches
+[yahya-azeem/AstroSim](https://github.com/yahya-azeem/AstroSim) (Rust + wgpu
++ ImGui) with the literal **OpenSCAD 1U STL** as a live `CUBESAT` mesh and
+an ImGui **Live CubeSat** panel with two modes:
+
+| Mode | View |
+|---|---|
+| Earth (specific) | follows Earth at 0.007 AU, live orbit and altitude/speed |
+| Universe (big picture) | the full AstroSim galactic-scale simulation |
+
+```bash
+./integrations/astrosim/build-wasm.sh   # emsdk + wasm-bindgen required
+```
+
+It is iframe-embeddable (`?mode=earth|universe&endpoint=...`) and exposes
+`window.AstroSim` plus a `postMessage` API (`astrosim:setMode`,
+`astrosim:getState`). See `integrations/astrosim/README.md` for the data flow,
+API and run steps.
+
+| Earth | Universe |
+|---|---|
+| ![](integrations/astrosim/astrosim-earth.png) | ![](integrations/astrosim/astrosim-universe.png) |
 
 ## Physical model (OpenSCAD)
 

@@ -224,6 +224,44 @@ void test_ephemeris()
     std::remove(kPath);
 }
 
+double length3(const std::array<double, 3>& v)
+{
+    return std::sqrt((v[0] * v[0]) + (v[1] * v[1]) + (v[2] * v[2]));
+}
+
+void test_demo_kernel()
+{
+    using namespace cubesat::spice;
+
+    Kernel lsk;
+    CHECK_OK(lsk.load(kernel_dir + "/naif0012.tls"));
+    Kernel frames;
+    CHECK_OK(frames.load(kernel_dir + "/cubesat.tf"));
+    Kernel spk;
+    CHECK_OK(spk.load(kernel_dir + "/cubesat_demo.bsp"));
+
+    constexpr double et = 847713669.183;
+
+    auto sat = state("CUBESAT", et, "J2000", "NONE", "EARTH");
+    CHECK_OK(sat);
+    if (sat) {
+        CHECK(std::abs(length3(sat->position_km) - 6928.137) < 1.0);
+        CHECK(std::abs(length3(sat->velocity_km_s) - 7.6) < 0.1);
+    }
+
+    auto sun = state("SUN", et, "J2000", "NONE", "EARTH");
+    CHECK_OK(sun);
+    if (sun) {
+        CHECK(std::abs(length3(sun->position_km) - 149597870.7) < 1000.0);
+    }
+
+    auto earth = state("EARTH", et, "J2000", "NONE", "SUN");
+    CHECK_OK(earth);
+    if (earth) {
+        CHECK(std::abs(length3(earth->position_km) - 149597870.7) < 1000.0);
+    }
+}
+
 void test_frames()
 {
     using namespace cubesat::spice;
@@ -279,6 +317,7 @@ int main(int argc, char** argv)
     test_time_errors();
     test_kernel_errors();
     test_ephemeris();
+    test_demo_kernel();
     test_frames();
 
     if (failures != 0) {

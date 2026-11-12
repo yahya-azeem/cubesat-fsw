@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AstroSim embed</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070d; color: #dce8ff;
+               font: 13px ui-monospace, monospace; }
+  #sim { width: 100%; height: calc(100% - 92px); border: 0; display: block; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 10px 14px; }
+  button { background: #16233f; color: #cfe3ff; border: 1px solid #2e4a7a;
+           border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+  #telemetry { margin: 0; padding: 0 14px 12px; color: #7fa7d8; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<iframe id="sim" title="AstroSim"
+        src="/?mode=earth&endpoint=http://127.0.0.1:8787/state"></iframe>
+<div class="bar">
+  <button data-mode="earth">Earth</button>
+  <button data-mode="universe">Universe</button>
+  <span id="status">connecting…</span>
+</div>
+<pre id="telemetry">no telemetry yet</pre>
+
+<script>
+  const sim = document.getElementById('sim');
+  const status = document.getElementById('status');
+  const telemetry = document.getElementById('telemetry');
+  const send = (message) => sim.contentWindow.postMessage(message, '*');
+
+  document.querySelectorAll('button[data-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      send({ type: 'astrosim:setMode', mode: button.dataset.mode });
+    });
+  });
+
+  addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type === 'astrosim:ready') {
+      status.textContent = 'ready';
+    } else if (data.type === 'astrosim:state') {
+      status.textContent = `mode: ${data.mode}`;
+      telemetry.textContent = JSON.stringify(data.telemetry, null, 2);
+    }
+  });
+
+  setInterval(() => send({ type: 'astrosim:getState' }), 1000);
+</script>
+</body>
+</html>

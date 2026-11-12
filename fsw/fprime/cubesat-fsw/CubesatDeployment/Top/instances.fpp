@@ -74,4 +74,6 @@ module CubesatDeployment {
 
   instance radioDriver: Cubesat.RadioDriver base id 0x10017000
 
+  instance astroNav: Cubesat.AstroNav base id 0x10018000
+
 }

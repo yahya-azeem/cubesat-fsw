@@ -81,6 +81,8 @@ runtime). Keep that boundary sharp.
 |---|---|---|
 | `fsw/fprime/cubesat-fsw/Cubesat/PowerCore` | C++20 | battery, mode FSM, CCSDS |
 | `fsw/fprime/cubesat-fsw/Cubesat/Storage` | C++20 + C17 | LittleFS wrapper |
+| `fsw/fprime/cubesat-fsw/Cubesat/Spice` | C++23 | bounded CSPICE wrapper |
+| `fsw/fprime/cubesat-fsw/Cubesat/Components/AstroNav` | C++20 | CSPICE telemetry component |
 | `fsw/fprime/cubesat-fsw/Cubesat/Components` | C++20 | F´ passive components |
 | `fsw/fprime/cubesat-fsw/CubesatDeployment` | FPP | topology and instances |
 | `fsw/tests/` | C++20 | host unit tests |

@@ -4,3 +4,4 @@
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/PowerManager/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/DataStore/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/RadioDriver/")
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/AstroNav/")

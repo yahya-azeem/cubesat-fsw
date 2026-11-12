@@ -18,7 +18,8 @@ fsw/
     │   └── Components/
     │       ├── PowerManager/     # passive, gates the PA
     │       ├── DataStore/        # passive, appends hk.log
-    │       └── RadioDriver/      # PA enable consumer
+    │       ├── RadioDriver/      # PA enable consumer
+    │       └── AstroNav/         # 1 Hz CSPICE ephemeris telemetry
     └── CubesatDeployment/        # topology, 1 Hz rate group
 ```
 
@@ -26,7 +27,7 @@ fsw/
 
 ```bash
 make -C fsw          # builds and runs all three suites, ~2 s
-make fprime-ut       # 11 F´ component tests via fprime-util check
+make fprime-ut       # 14 F´ component tests via fprime-util check
 ```
 
 They are dependency-free (no gtest, no heap, no exceptions) and run on the
@@ -45,7 +46,9 @@ host. Coverage:
   full, corrupted-superblock fail-closed, and wear-leveling erases;
 - CSPICE: UTC/ET round-trips, invalid/overlong/NUL inputs, missing kernels,
   synthetic SPK ephemerides, out-of-coverage recovery, orthonormal frames,
-  and an ASan/UBSan pass.
+  and an ASan/UBSan pass;
+- AstroNav: kernel load, 550 km altitude, 7.6 km/s speed, unit Sun vector,
+  sub-satellite point bounds, and 1 Hz ET/telemetry advance.
 
 The mission test caught a real bug: `charge(1500 mW, 1 s)` truncates to
 0 mWh. Accounting is now in milliwatt-seconds internally (`Battery::stored_mws`),

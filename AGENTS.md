@@ -15,6 +15,8 @@ runtime). Keep that boundary sharp.
 
 - C++20, restricted subset. Build with
   `-std=c++20 -fno-exceptions -fno-rtti -fno-threadsafe-statics`.
+  **Exception:** `Cubesat/Spice` is C++23 (`std::expected`, target-scoped
+  `cxx_std_23`); it is still exception-free and heap-free.
 - No heap after initialization. No `new`/`delete`, no `std::string`,
   `std::vector`, `std::map`, streams or `iostream` in flight code.
 - Prefer `std::array`, `std::span`, `std::optional`, `constexpr`,

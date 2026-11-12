@@ -20,7 +20,7 @@ ARM_TARGET := thumbv7em-none-eabihf
 .PHONY: help all avr riscv rust fsw build clean sim vcd wave \
         debug debug-avr debug-riscv verify doctor esp32 \
         rust-test rust-riscv rust-arm rust-riscv-run rust-check rust-fmt \
-        fprime fprime-run fprime-ut fprime-gds gds-demo cad cad-preview cad-check
+        fprime fprime-run fprime-ut fprime-gds gds-demo demo-guided cad cad-preview cad-check cspice
 
 help:
 	@echo "embedded - headless FOSS toolchain (F´/C++ flight software)"
@@ -32,8 +32,10 @@ help:
 	@echo "  make fprime-ut     run the F´ component unit tests (11 tests)"
 	@echo "  make fprime-gds    launch the browser GDS on http://localhost:5000"
 	@echo "  make gds-demo      drive a full pass through the live GDS"
+	@echo "  make demo-guided   guided pass: press Enter step by step"
 	@echo "  make cad           export 1U/exploded STL from cad/cubesat.scad"
 	@echo "  make cad-preview   render the CAD PNGs"
+	@echo "  make cspice        download NAIF CSPICE (43 MB, no sudo)"
 	@echo "  make rust          test mission logic + build both Rust firmwares"
 	@echo "  make rust-test     host unit tests for cubesat-core"
 	@echo "  make rust-riscv    build rv32 firmware (QEMU virt)"
@@ -78,6 +80,9 @@ fprime-gds: fprime
 gds-demo:
 	$(ROOT)/scripts/gds-demo.sh
 
+demo-guided:
+	$(ROOT)/scripts/demo-guided.sh
+
 # CAD: OpenSCAD 2021.01 or newer. Override with OPENSCAD=/path/to/AppImage.
 OPENSCAD ?= openscad
 
@@ -97,6 +102,9 @@ cad-preview:
 cad-check: cad
 	python3 $(ROOT)/cad/check_stl.py \
 		$(ROOT)/cad/cubesat.stl $(ROOT)/cad/cubesat-exploded.stl
+
+cspice:
+	$(ROOT)/setup/install-cspice.sh
 
 rust: rust-test rust-arm rust-riscv
 

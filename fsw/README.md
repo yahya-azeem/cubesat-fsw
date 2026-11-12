@@ -1,18 +1,20 @@
 # Flight software (C++ / F´)
 
 The mission FSW is a real F´ 4.4 project at
-`fprime/cubesat-fsw/`, with two project components and two libraries.
+`fprime/cubesat-fsw/`, with three project components and three libraries.
 
 ```
 fsw/
-├── Makefile                      # host tests (power + LittleFS)
+├── Makefile                      # host tests (power + LittleFS + CSPICE)
 ├── tests/
 │   ├── test_power.cpp            # 87 checks
-│   └── test_storage.cpp          # 59 checks
+│   ├── test_storage.cpp          # 59 checks
+│   └── test_spice.cpp            # CSPICE wrapper, bounds and error paths
 └── fprime/cubesat-fsw/
     ├── Cubesat/
     │   ├── PowerCore/            # battery, mode FSM, CCSDS header
     │   ├── Storage/              # LittleFS 2.11.2 + FileStore (RAM / SPI NOR)
+    │   ├── Spice/                # C++23 CSPICE wrapper + kernels
     │   └── Components/
     │       ├── PowerManager/     # passive, gates the PA
     │       ├── DataStore/        # passive, appends hk.log
@@ -23,7 +25,7 @@ fsw/
 ## Run the tests
 
 ```bash
-make -C fsw          # builds and runs both suites, ~1 s
+make -C fsw          # builds and runs all three suites, ~2 s
 make fprime-ut       # 11 F´ component tests via fprime-util check
 ```
 
@@ -40,7 +42,10 @@ host. Coverage:
   (1, 256, 65535), bit masking and short buffers;
 - LittleFS persistence across remount, brown-out mid-write, append across
   mounts, overwrite, multi-file isolation, 4 KiB multi-block files, device
-  full, corrupted-superblock fail-closed, and wear-leveling erases.
+  full, corrupted-superblock fail-closed, and wear-leveling erases;
+- CSPICE: UTC/ET round-trips, invalid/overlong/NUL inputs, missing kernels,
+  synthetic SPK ephemerides, out-of-coverage recovery, orthonormal frames,
+  and an ASan/UBSan pass.
 
 The mission test caught a real bug: `charge(1500 mW, 1 s)` truncates to
 0 mWh. Accounting is now in milliwatt-seconds internally (`Battery::stored_mws`),
@@ -52,6 +57,12 @@ before checking the energy guard (it now checks first and never emits a mode
 it cannot sustain).
 
 ## Build / run the F´ deployment
+
+CSPICE must be fetched once (43 MB, gitignored):
+
+```bash
+./setup/install-cspice.sh
+```
 
 ```bash
 make fprime        # warning: first build is ~900 targets

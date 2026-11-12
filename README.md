@@ -13,7 +13,7 @@ embedded/
 ├── fsw/                      # F´ 4.4 flight software + host tests
 │   ├── tests/{test_power,test_storage}.cpp
 │   └── fprime/cubesat-fsw/
-│       ├── Cubesat/{PowerCore,Storage,Components}
+│       ├── Cubesat/{PowerCore,Storage,Spice,Components}
 │       └── CubesatDeployment     # topology + 1 Hz rate group
 ├── avr/                      # atmega328p C17 demo + simavr VCD harness
 ├── riscv/                    # bare-metal rv32 C17 demo (QEMU virt)
@@ -30,6 +30,7 @@ embedded/
 cd ~/Projects/embedded
 ./setup/install.sh         # system packages (sudo)
 ./setup/install-fprime.sh  # F´ tooling venv (no sudo)
+./setup/install-cspice.sh  # NAIF CSPICE toolkit (no sudo)
 ./setup/verify.sh          # 20/20 passing on this machine
 ```
 
@@ -74,6 +75,9 @@ make fprime-gds    # browser GDS on http://localhost:5000
   before keying the PA, latches a fault otherwise.
 - **DataStore** — passive component; appends 8-byte housekeeping records to
   `hk.log` at 1 Hz.
+- **Spice** — C++23, `std::expected`-based wrapper around NAIF CSPICE:
+  bounded strings, RETURN error mode, finite-state and orthonormal-matrix
+  checks, RAII kernels. See `fsw/fprime/cubesat-fsw/Cubesat/Spice/README.md`.
 - **CubesatDeployment** — both instances on `rateGroup_1Hz` slots 6 and 7,
   with the deployment's telemetry/event/time pattern connections.
 

@@ -13,4 +13,8 @@ fsw/fprime/cubesat-fsw/build-artifacts/
 logs/
 *.gcda
 *.gcno
+
+# NAIF CSPICE toolkit (run setup/install-cspice.sh)
+third_party/cspice/
 cad/*.stl
+rust/target/

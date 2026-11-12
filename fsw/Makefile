@@ -5,12 +5,15 @@ FW       := fprime/cubesat-fsw
 CORE     := $(FW)/Cubesat/PowerCore
 STORAGE  := $(FW)/Cubesat/Storage
 LFS      := $(STORAGE)/third_party/littlefs
+SPICE    := $(FW)/Cubesat/Spice
+CSPICE   := ../third_party/cspice
 
 CXXFLAGS ?= -std=c++20 -O2 -g \
             -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion \
             -Werror -fno-exceptions -fno-rtti -fno-threadsafe-statics \
             -I$(FW)
 STORAGE_CXXFLAGS := $(CXXFLAGS) -I$(STORAGE)
+SPICE_CXXFLAGS   := $(CXXFLAGS) -std=c++23 -isystem $(CSPICE)/include
 # Vendored C: build it strictly, but do not fail on third-party warnings.
 # Logging is compiled out: flight has no stderr, and the corruption tests
 # deliberately trigger error paths.
@@ -43,9 +46,18 @@ $(BUILD)/test_storage: tests/test_storage.cpp $(BUILD)/file_store.o \
 	$(CXX) $(STORAGE_CXXFLAGS) -o $@ tests/test_storage.cpp \
 		$(BUILD)/file_store.o $(BUILD)/lfs.o $(BUILD)/lfs_util.o
 
-test: $(BUILD)/test_power $(BUILD)/test_storage
+$(BUILD)/spice.o: $(SPICE)/spice.cpp $(SPICE)/spice.hpp | $(BUILD)
+	$(CXX) $(SPICE_CXXFLAGS) -c -o $@ $<
+
+$(BUILD)/test_spice: tests/test_spice.cpp $(BUILD)/spice.o \
+                     $(CSPICE)/lib/cspice.a | $(BUILD)
+	$(CXX) $(SPICE_CXXFLAGS) -o $@ tests/test_spice.cpp \
+		$(BUILD)/spice.o $(CSPICE)/lib/cspice.a -lm
+
+test: $(BUILD)/test_power $(BUILD)/test_storage $(BUILD)/test_spice
 	./$(BUILD)/test_power
 	./$(BUILD)/test_storage
+	./$(BUILD)/test_spice $(SPICE)/kernels
 
 clean:
 	rm -rf $(BUILD)

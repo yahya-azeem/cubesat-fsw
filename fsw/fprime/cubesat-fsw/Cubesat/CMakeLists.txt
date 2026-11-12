@@ -3,4 +3,5 @@
 
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/PowerCore")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Storage")
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Spice")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Components")

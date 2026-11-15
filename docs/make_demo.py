@@ -195,17 +195,17 @@ def build_frames() -> list[Path]:
     f.save(frames[-1])
 
     f = frame(
-        "Specific mode", "Earth limb · literal OpenSCAD 1U mesh",
+        "Specific mode", "literal OpenSCAD 1U model · loaded as the AstroSim mesh",
         [
-            "The entity is the exact STL export",
-            "of cad/cubesat.scad: 7,920 triangles.",
+            "The AstroSim entity is the STL export",
+            "of this cad/cubesat.scad model:",
             "",
-            "Scaled as a visibility marker;",
+            "7,920 triangles, scaled as a marker;",
             "true 1U is 113.5 mm.",
             "",
             "ImGui panel: Earth / Universe.",
         ],
-        ROOT / "integrations/astrosim/astrosim-earth.png",
+        ROOT / "cad/cubesat.png",
     )
     frames.append(FRAMES / "04.png")
     f.save(frames[-1])

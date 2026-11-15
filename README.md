@@ -1,65 +1,86 @@
-# embedded — F´/C++ flight software sandbox
+# 1U CubeSat — F´ flight-software sandbox
 
-Headless toolchain for the 1U CubeSat: F´ components in C++, emulators driven
-from the shell, VCD waveforms, GDB on `localhost:1234`. KiCad stays separate.
+![1U CubeSat flight-software sandbox](docs/hero.png)
 
-**Language policy** (`AGENTS.md`): flight components are **C++20 / F´**,
-board and vendor code is **C17**, Rust is only for `Svc::WasmSequencer`
-sequences and host-side reference models. Both C and C++ build with
-warnings-as-errors and a no-heap rule.
+A demo-grade 1U avionics sandbox built around NASA F´: a duty-cycled power
+supervisor with a battery-reserve guard, a power-loss-safe LittleFS store, a
+C++23 CSPICE astrodynamics wrapper, and live telemetry rendered both in a
+Three.js orbit view and inside a patched AstroSim (Rust, wgpu, ImGui). The
+repo also carries the OpenSCAD 1U packaging model and a synthetic LEO
+ephemeris.
+
+[![ci](https://github.com/yahya-azeem/cubesat-fsw/actions/workflows/ci.yml/badge.svg)](https://github.com/yahya-azeem/cubesat-fsw/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+> **Demo-grade — not flight-qualified.** Synthetic ephemeris, no hardware
+> qualification, packaging CAD only.
+
+## One command
+
+```bash
+git clone --recurse-submodules https://github.com/yahya-azeem/cubesat-fsw.git
+cd cubesat-fsw
+./setup/install.sh && ./setup/install-fprime.sh && ./setup/install-cspice.sh
+make check
+```
+
+`make check` runs **146 host assertions** (power, LittleFS, CSPICE) and
+**14 F´ component tests**. `install.sh` targets Arch/CachyOS; Debian/Ubuntu
+use the apt block in `.github/workflows/ci.yml`.
+
+[48-second captioned demo reel](docs/demo.mp4) ·
+[live orbit view](integrations/orbit-view/) ·
+[AstroSim integration](integrations/astrosim/)
+
+## What is here
+
+- **PowerCore** — milliwatt-second energy accounting, 20 % reserve, fail-closed
+  `Safe → Charge → AwaitPass → Downlink` supervisor.
+- **Storage** — vendored LittleFS with RAM and SPI-NOR backends; brown-out
+  and corrupt-superblock tests.
+- **Spice** — bounded C++23 `std::expected` wrapper around NAIF CSPICE.
+- **AstroNav** — 1 Hz ephemeris telemetry from a demo SPK.
+- **GDS demo** — command the state machine and watch the PA gate and battery
+  guard from the browser or `fprime-cli`.
+- **Visuals** — Three.js live orbit, AstroSim wasm with ImGui Earth/Universe
+  modes, literal OpenSCAD 1U STL mesh.
+- **CAD** — parametric 1U model with a manifold checker.
+
+## Layout
 
 ```
-embedded/
-├── fsw/                      # F´ 4.4 flight software + host tests
-│   ├── tests/{test_power,test_storage}.cpp
+cubesat-fsw/
+├── fsw/                      # F´ 4.4 deployment + host tests
+│   ├── tests/{test_power,test_storage,test_spice}.cpp
 │   └── fprime/cubesat-fsw/
 │       ├── Cubesat/{PowerCore,Storage,Spice,Components}
 │       └── CubesatDeployment     # topology + 1 Hz rate group
-├── avr/                      # atmega328p C17 demo + simavr VCD harness
-├── riscv/                    # bare-metal rv32 C17 demo (QEMU virt)
-├── rust/                     # host reference model + QEMU sandbox
-├── integrations/              # live 3D orbit view + AstroSim adapter
-├── cad/                      # OpenSCAD 1U packaging model
-├── tools/gen-pac.sh          # VA41620 PAC from the vendor SVD
-├── setup/{install,install-fprime,verify}.sh
-└── esp32/README.md
+├── integrations/
+│   ├── orbit-view/            # Three.js live telemetry view
+│   └── astrosim/              # AstroSim wasm patch, bridge, embed page
+├── cad/                      # OpenSCAD 1U model + STL checker
+├── docs/                     # hero, social preview, demo reel
+├── avr/ riscv/ rust/         # toolchain demos and reference models
+├── setup/                    # system, F´ venv, CSPICE installers
+└── .github/workflows/ci.yml
 ```
 
-## Install
+## Toolchain notes
 
-```bash
-cd ~/Projects/embedded
-./setup/install.sh         # system packages (sudo)
-./setup/install-fprime.sh  # F´ tooling venv (no sudo)
-./setup/install-cspice.sh  # NAIF CSPICE toolkit (no sudo)
-./setup/verify.sh          # 20/20 passing on this machine
-```
-
-## Verify
-
-```bash
-cd ~/Projects/embedded
-./setup/verify.sh      # 20/20 passing on this machine
-```
-
-Installed: `avr-gcc 16`, `avr-gdb`, `avrdude`, `simavr 1.8`, QEMU 11
-(`avr`, `riscv32`, `xtensa`), `gtkwave`, `riscv64-elf-gcc`, Rust 1.97 with
-`thumbv7em-none-eabihf` + `riscv32imac/imc-none-elf`.
-
-Shell note: the F´ venv has both activate scripts. **fish** cannot parse
-bash's `activate`, so use:
+The F´ venv has both activate scripts. **fish** cannot parse bash's
+`activate`:
 
 ```fish
 source ~/Projects/embedded/.venv-fprime/bin/activate.fish
 ```
 
-For bash/zsh use `bin/activate` instead. The Makefile sources it under
-`/bin/bash`, so `make` targets work from either shell.
+For bash/zsh use `bin/activate`. The Makefile sources it under `/bin/bash`,
+so `make` targets work from either shell.
 
 ## Flight software (C++ / F´)
 
 ```bash
-make fsw           # 146 host assertions across two suites
+make fsw           # 146 host assertions across three suites
 make fprime        # build the F´ deployment (PowerManager + DataStore)
 make fprime-ut     # 14 F´ component tests (fprime-util check + GTest)
 make fprime-run    # boot it headlessly; LittleFS prints StorageReady
@@ -267,3 +288,9 @@ no public SVD, so point it at the vendor DFP.
   energy, not junction temperature — model the burst thermal transient.
 - **No public VA41620 SVD**; the memory map in
   `rust/firmware-va41620/linker.ld` is a placeholder, not a datasheet.
+
+
+## License
+
+Apache-2.0. NASA F´ is Apache-2.0 and lives in the `lib/fprime` submodule;
+AstroSim is patched locally and not redistributed.

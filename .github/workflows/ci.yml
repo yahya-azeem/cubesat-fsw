@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git curl \
+            python3 python3-venv python3-pip
+
+      - name: Cache F´ tooling venv
+        uses: actions/cache@v4
+        with:
+          path: .venv-fprime
+          key: venv-${{ runner.os }}-${{ hashFiles('setup/install-fprime.sh') }}
+
+      - name: Cache CSPICE
+        uses: actions/cache@v4
+        with:
+          path: third_party/cspice
+          key: cspice-n0067-${{ runner.os }}
+
+      - name: Install F´ tooling
+        run: ./setup/install-fprime.sh
+
+      - name: Install CSPICE
+        run: ./setup/install-cspice.sh
+
+      - name: Host tests (power, LittleFS, CSPICE)
+        run: make fsw
+
+      - name: Generate F´ caches
+        run: make fprime-setup
+
+      - name: F´ component tests
+        run: make fprime-ut
+
+      - name: Build deployment
+        run: make fprime

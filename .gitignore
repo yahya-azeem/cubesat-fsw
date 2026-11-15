@@ -21,3 +21,6 @@ rust/target/
 
 # AstroSim wasm build tree (cloned by build-wasm.sh)
 integrations/astrosim/upstream/
+
+# generated demo frames
+docs/frames/

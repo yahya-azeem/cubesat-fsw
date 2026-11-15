@@ -20,11 +20,12 @@ ARM_TARGET := thumbv7em-none-eabihf
 .PHONY: help all avr riscv rust fsw build clean sim vcd wave \
         debug debug-avr debug-riscv verify doctor esp32 \
         rust-test rust-riscv rust-arm rust-riscv-run rust-check rust-fmt \
-        fprime fprime-run fprime-ut fprime-gds gds-demo demo-guided cad cad-preview cad-check cspice orbit-view astrosim
+        fprime fprime-setup fprime-run fprime-ut fprime-gds gds-demo demo-guided check cad cad-preview cad-check cspice orbit-view astrosim
 
 help:
 	@echo "embedded - headless FOSS toolchain (F´/C++ flight software)"
 	@echo ""
+	@echo "  make check         host suites + F´ component tests (clean-clone path)"
 	@echo "  make verify        check the installed toolchain"
 	@echo "  make fsw           build + run the C++ flight-policy and LittleFS tests"
 	@echo "  make fprime        build the F´ deployment (PowerManager + DataStore)"
@@ -64,17 +65,25 @@ build: rust fsw avr riscv
 fsw:
 	$(MAKE_FSW)
 
-fprime:
+# Generate the F´ caches on a clean clone. Idempotent.
+fprime-setup:
+	@cd $(FPRIME_DIR) && \
+	  if [ ! -d build-fprime-automatic-native ]; then $(FPRIME_SRC) fprime-util generate; fi && \
+	  if [ ! -d build-fprime-automatic-native-ut ]; then $(FPRIME_SRC) fprime-util generate --ut; fi
+
+fprime: fprime-setup
 	cd $(FPRIME_DIR) && $(FPRIME_SRC) fprime-util build -j$$(nproc)
 
 fprime-run: fprime
 	cd $(FPRIME_DIR) && timeout 5 $(FPRIME_BIN) < /dev/null || true
 
-fprime-ut:
+fprime-ut: fprime-setup
 	@set -e; for c in PowerManager DataStore RadioDriver AstroNav; do \
 		echo "=== $$c ==="; \
 		(cd $(FPRIME_DIR)/Cubesat/Components/$$c && $(FPRIME_SRC) fprime-util check); \
 	done
+
+check: fsw fprime-ut
 
 fprime-gds: fprime
 	cd $(FPRIME_DIR) && $(FPRIME_SRC) fprime-gds -d build-artifacts/Linux/CubesatDeployment --skip-browser-open

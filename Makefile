@@ -20,7 +20,7 @@ ARM_TARGET := thumbv7em-none-eabihf
 .PHONY: help all avr riscv rust fsw build clean sim vcd wave \
         debug debug-avr debug-riscv verify doctor esp32 \
         rust-test rust-riscv rust-arm rust-riscv-run rust-check rust-fmt \
-        fprime fprime-setup fprime-run fprime-ut fprime-gds gds-demo demo-guided check cad cad-preview cad-check cspice orbit-view astrosim
+        fprime fprime-setup fprime-run fprime-ut fprime-gds gds-demo demo-guided check cad cad-preview cad-check cspice telemetry astrosim
 
 help:
 	@echo "embedded - headless FOSS toolchain (F´/C++ flight software)"
@@ -37,7 +37,7 @@ help:
 	@echo "  make cad           export 1U/exploded STL from cad/cubesat.scad"
 	@echo "  make cad-preview   render the CAD PNGs"
 	@echo "  make cspice        download NAIF CSPICE (43 MB, no sudo)"
-	@echo "  make orbit-view    serve the live 3D orbit view (:8787)"
+	@echo "  make telemetry     serve live AstroNav telemetry JSON (:8787)"
 	@echo "  make astrosim      build AstroSim wasm with the live CubeSat patch"
 	@echo "  make rust          test mission logic + build both Rust firmwares"
 	@echo "  make rust-test     host unit tests for cubesat-core"
@@ -117,8 +117,8 @@ cad-check: cad
 cspice:
 	$(ROOT)/setup/install-cspice.sh
 
-orbit-view:
-	python3 $(ROOT)/integrations/orbit-view/serve.py
+telemetry:
+	python3 $(ROOT)/integrations/telemetry/serve.py
 
 astrosim:
 	$(ROOT)/integrations/astrosim/build-wasm.sh

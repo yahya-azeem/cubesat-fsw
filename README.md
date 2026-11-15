@@ -4,8 +4,8 @@
 
 A demo-grade 1U avionics sandbox built around NASA F´: a duty-cycled power
 supervisor with a battery-reserve guard, a power-loss-safe LittleFS store, a
-C++23 CSPICE astrodynamics wrapper, and live telemetry rendered both in a
-Three.js orbit view and inside a patched AstroSim (Rust, wgpu, ImGui). The
+C++23 CSPICE astrodynamics wrapper, and live telemetry rendered inside a
+patched AstroSim (Rust, wgpu, ImGui) through a small Python bridge. The
 repo also carries the OpenSCAD 1U packaging model and a synthetic LEO
 ephemeris.
 
@@ -29,7 +29,7 @@ make check
 use the apt block in `.github/workflows/ci.yml`.
 
 [48-second captioned demo reel](docs/demo.mp4) ·
-[live orbit view](integrations/orbit-view/) ·
+[telemetry bridge](integrations/telemetry/) ·
 [AstroSim integration](integrations/astrosim/)
 
 ## What is here
@@ -42,8 +42,8 @@ use the apt block in `.github/workflows/ci.yml`.
 - **AstroNav** — 1 Hz ephemeris telemetry from a demo SPK.
 - **GDS demo** — command the state machine and watch the PA gate and battery
   guard from the browser or `fprime-cli`.
-- **Visuals** — Three.js live orbit, AstroSim wasm with ImGui Earth/Universe
-  modes, literal OpenSCAD 1U STL mesh.
+- **Visuals** — AstroSim wasm with ImGui Earth/Universe modes and the
+  literal OpenSCAD 1U STL mesh; a ~100-line Python telemetry bridge.
 - **CAD** — parametric 1U model with a manifold checker.
 
 ## Layout
@@ -56,7 +56,7 @@ cubesat-fsw/
 │       ├── Cubesat/{PowerCore,Storage,Spice,Components}
 │       └── CubesatDeployment     # topology + 1 Hz rate group
 ├── integrations/
-│   ├── orbit-view/            # Three.js live telemetry view
+│   ├── telemetry/             # GDS channel.log -> /state JSON
 │   └── astrosim/              # AstroSim wasm patch, bridge, embed page
 ├── cad/                      # OpenSCAD 1U model + STL checker
 ├── docs/                     # hero, social preview, demo reel
@@ -179,26 +179,29 @@ flight sequencer.
 
 ## Live 3D view
 
-![live orbit](integrations/orbit-view/live.png)
+![live orbit](docs/orbit.png)
 
-`integrations/orbit-view` is a zero-build Three.js view of the live AstroNav
-telemetry: Earth, the predicted orbit, the satellite, the Sun vector and the
-nadir point. It reads the newest GDS channel log through a small Python
-bridge, so the flight software knows nothing about the web UI.
+A ~100-line Python bridge tails the newest GDS channel log and serves the
+AstroNav channels as JSON on `:8787/state`. The renderer is
+[yahya-azeem/AstroSim](https://github.com/yahya-azeem/AstroSim) (Rust + wgpu
++ ImGui), patched with the literal **OpenSCAD 1U STL** as a live `CUBESAT`
+mesh and an ImGui **Live CubeSat** panel with two modes. There is no
+JavaScript renderer and no bundled 3D library.
 
 ```bash
-python3 integrations/orbit-view/serve.py     # http://localhost:8787
+python3 integrations/telemetry/serve.py                     # :8787
+python3 -m http.server 8010 --directory integrations/astrosim/upstream
+# http://localhost:8010/embed.html
 ```
-
-`integrations/astrosim` takes this further: it patches
-[yahya-azeem/AstroSim](https://github.com/yahya-azeem/AstroSim) (Rust + wgpu
-+ ImGui) with the literal **OpenSCAD 1U STL** as a live `CUBESAT` mesh and
-an ImGui **Live CubeSat** panel with two modes:
 
 | Mode | View |
 |---|---|
-| Earth (specific) | follows Earth at 0.007 AU, live orbit and altitude/speed |
+| Earth (specific) | targets the live CubeSat at 0.0004 AU; Earth limb behind |
 | Universe (big picture) | the full AstroSim galactic-scale simulation |
+
+| Earth | Universe |
+|---|---|
+| ![](integrations/astrosim/astrosim-earth.png) | ![](integrations/astrosim/astrosim-universe.png) |
 
 ```bash
 ./integrations/astrosim/build-wasm.sh   # emsdk + wasm-bindgen required

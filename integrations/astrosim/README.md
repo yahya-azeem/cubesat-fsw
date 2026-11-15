@@ -71,7 +71,7 @@ F´ AstroNav (CSPICE)
 GDS logs/fprime-gds-*/channel.log
         │  tail parsing
         ▼
-integrations/orbit-view/serve.py  :8787/state   (JSON)
+integrations/telemetry/serve.py  :8787/state   (JSON)
         │  fetch every 500 ms
         ▼
 cubesat_bridge.js  (equatorial km → ecliptic m)
@@ -129,7 +129,7 @@ Three processes:
 make fprime-gds
 
 # 2. telemetry bridge (AstroNav -> JSON)
-python3 integrations/orbit-view/serve.py      # :8787
+python3 integrations/telemetry/serve.py       # :8787
 
 # 3. AstroSim wasm
 python3 -m http.server 8000 --directory integrations/astrosim/upstream

@@ -37,6 +37,6 @@ wasm-bindgen --target web --out-dir "$SRC/pkg" \
 
 echo
 echo "AstroSim ready. Start the telemetry bridge and serve the app:"
-echo "  python3 $ROOT/integrations/orbit-view/serve.py"
+echo "  python3 $ROOT/integrations/telemetry/serve.py"
 echo "  python3 -m http.server 8000 --directory $SRC"
 echo "  open http://localhost:8000/"

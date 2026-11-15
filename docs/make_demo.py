@@ -81,7 +81,7 @@ def hero() -> Image.Image:
     draw.text((64, y + 56), "Demo-grade — not flight-qualified",
               font=font(FONT_BOLD, 24), fill=GOLD)
 
-    earth = cover(ROOT / "integrations/orbit-view/live.png", (470, 700))
+    earth = cover(ROOT / "docs/orbit.png", (470, 700))
     universe = cover(ROOT / "integrations/astrosim/astrosim-universe.png", (470, 700))
     image.paste(earth, (630, 50))
     image.paste(universe, (1120, 50))
@@ -106,7 +106,7 @@ def social() -> Image.Image:
     draw.text((56, 390), "github.com/yahya-azeem/cubesat-fsw",
               font=font(FONT_MONO, 18), fill=DIM)
 
-    image.paste(cover(ROOT / "integrations/orbit-view/live.png", (360, 540)), (470, 50))
+    image.paste(cover(ROOT / "docs/orbit.png", (360, 540)), (470, 50))
     image.paste(cover(ROOT / "integrations/astrosim/astrosim-universe.png", (360, 540)), (870, 50))
     draw.rectangle((470, 50, 829, 589), outline=BORDER, width=2)
     draw.rectangle((870, 50, 1229, 589), outline=BORDER, width=2)
@@ -173,7 +173,7 @@ def build_frames() -> list[Path]:
             "",
             "# 550.0 km · 7.585 km/s",
         ],
-        ROOT / "integrations/orbit-view/live.png",
+        ROOT / "docs/orbit.png",
     )
     frames.append(FRAMES / "02.png")
     f.save(frames[-1])

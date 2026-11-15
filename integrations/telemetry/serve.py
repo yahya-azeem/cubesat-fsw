@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Serve the orbit view and a /state feed parsed from the newest GDS log.
+"""Expose AstroNav telemetry from the newest F´ GDS log as JSON.
 
-The F´ GDS writes each telemetry channel to logs/fprime-gds-*/channel.log.
-This reads the tail of that file, so nothing in the flight software needs to
-know about the web UI.
+The GDS writes every channel to logs/fprime-gds-*/channel.log. This bridge
+tails that file and serves the latest AstroNav values on /state, so neither
+the flight software nor AstroSim needs to know about the log format.
+
+    python3 integrations/telemetry/serve.py        # :8787/state
 """
 
 from __future__ import annotations
@@ -11,11 +13,10 @@ from __future__ import annotations
 import json
 import math
 import os
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = ROOT / "fsw/fprime/cubesat-fsw/logs"
 PORT = int(os.environ.get("PORT", "8787"))
 
@@ -75,27 +76,30 @@ def read_state() -> dict:
     }
 
 
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(HERE), **kwargs)
-
+class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        if self.path.split("?", 1)[0] == "/state":
-            body = json.dumps(read_state()).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        path = self.path.split("?", 1)[0]
+        if path == "/state":
+            self._json(read_state())
+        elif path == "/health":
+            self._json({"ok": True})
         else:
-            super().do_GET()
+            self._json({"ok": False, "reason": "use /state"}, status=404)
 
-    def log_message(self, *args) -> None:  # keep the terminal clean
+    def _json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:
         pass
 
 
 if __name__ == "__main__":
-    print(f"orbit view: http://localhost:{PORT}  (/state from {LOG_DIR})")
+    print(f"telemetry bridge: http://localhost:{PORT}/state  (source: {LOG_DIR})")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

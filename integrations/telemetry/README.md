@@ -32,7 +32,7 @@ a different local port.
 There is no JavaScript in this repo for the orbit view. The only browser code
 is the small AstroSim bridge and the iframe API:
 
-- `integrations/astrosim/cubesat_bridge.js`
 - `integrations/astrosim/embed.html`
+- AstroSim's patched `index.html` (inline bridge)
 
 The renderer itself is Rust/wgpu/ImGui (AstroSim).

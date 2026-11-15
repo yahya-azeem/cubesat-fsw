@@ -1,14 +1,47 @@
 diff --git a/index.html b/index.html
-index 7ac4b43..5480553 100644
+index 7ac4b43..d9449a8 100644
 --- a/index.html
 +++ b/index.html
-@@ -35,13 +35,47 @@
+@@ -35,13 +35,80 @@
  </head>
  <body>
      <script type="module">
 -        import init, { start_simulation } from './pkg/AstroSim.js';
 +        import init, { start_simulation, set_cubesat_state, set_cubesat_mode } from './pkg/AstroSim.js';
-+        import { startCubesatBridge } from './cubesat_bridge.js';
++// Feed AstroSim's wasm export from the live F´/CSPICE bridge.
++// The orbit view's /state is J2000 equatorial km; AstroSim works in
++// Earth-centred ecliptic metres, so rotate about X by the obliquity.
++
++const OBLIQUITY = (23.4392911 * Math.PI) / 180.0;
++const METRES = 1000.0;
++
++function startCubesatBridge(setState, endpoint = 'http://127.0.0.1:8787/state', onState = () => {}) {
++  let failures = 0;
++
++  async function tick() {
++    try {
++      const response = await fetch(endpoint, { cache: 'no-store' });
++      const state = await response.json();
++      if (state.ok) {
++        const [x, y, z] = state.pos.map((v) => v * METRES);
++        const [vx, vy, vz] = state.velocity.map((v) => v * METRES);
++        const c = Math.cos(OBLIQUITY);
++        const s = Math.sin(OBLIQUITY);
++        setState(x, (y * c) + (z * s), (-y * s) + (z * c),
++                 vx, (vy * c) + (vz * s), (-vy * s) + (vz * c));
++        failures = 0;
++        onState(state);
++      }
++    } catch (error) {
++      failures += 1;
++      if (failures === 1) console.warn('CubeSat bridge offline:', error);
++    }
++    setTimeout(tick, 500);
++  }
++
++  tick();
++}
++
 +        const params = new URLSearchParams(location.search);
 +        const initialMode = params.get('mode');
 +        const endpoint = params.get('endpoint') || 'http://127.0.0.1:8787/state';
@@ -2330,7 +2363,7 @@ index 7e02890..edcab5c 100644
          Ok((state.radius_km, state.velocity_km_s))
      }
 diff --git a/src/lib.rs b/src/lib.rs
-index 9bfb278..24f6d16 100644
+index 9bfb278..3febc08 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -1,8 +1,8 @@
@@ -2386,7 +2419,7 @@ index 9bfb278..24f6d16 100644
 +#[cfg(target_arch = "wasm32")]
 +pub(crate) static CUBESAT_STATE: std::sync::Mutex<Option<[f64; 6]>> = std::sync::Mutex::new(None);
 +
-+/// Called from cubesat_bridge.js with the live F´/CSPICE state in metres,
++/// Called from the inline bridge in index.html with the live F´/CSPICE state in metres,
 +/// Earth-centred ecliptic J2000.
 +#[cfg(target_arch = "wasm32")]
 +#[wasm_bindgen]

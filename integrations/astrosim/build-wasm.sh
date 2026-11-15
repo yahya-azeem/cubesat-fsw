@@ -17,7 +17,6 @@ if [[ ! -d "$SRC/.git" ]]; then
 else
     echo "==> using existing $SRC"
 fi
-cp "$HERE/cubesat_bridge.js" "$SRC/"
 cp "$HERE/cubesat.stl" "$SRC/src/render/cubesat.stl"
 cp "$HERE/embed.html" "$SRC/embed.html"
 

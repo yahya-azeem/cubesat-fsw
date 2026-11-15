@@ -74,7 +74,7 @@ GDS logs/fprime-gds-*/channel.log
 integrations/telemetry/serve.py  :8787/state   (JSON)
         │  fetch every 500 ms
         ▼
-cubesat_bridge.js  (equatorial km → ecliptic m)
+index.html inline bridge  (equatorial km → ecliptic m)
         │  set_cubesat_state(x, y, z, vx, vy, vz)
         ▼
 AstroSim wasm  →  ImGui "Live CubeSat"  →  CUBESAT entity
@@ -93,7 +93,7 @@ The bridge rotates J2000 equatorial into AstroSim's ecliptic frame with the
 3. overrides the Keplerian CUBESAT position/velocity in the render loop with
    the live state (applying AstroSim's parent visual scale);
 4. adds the ImGui **Live CubeSat** panel with the two mode buttons;
-5. loads `cubesat_bridge.js` from `index.html`.
+5. inlines the telemetry bridge in `index.html` (no separate JS file).
 
 Verify the patch against a clean tree:
 
